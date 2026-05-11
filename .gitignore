@@ -1,0 +1,15 @@
+# secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Streamlit local cache
+.streamlit/
