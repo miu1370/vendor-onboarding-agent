@@ -1,12 +1,20 @@
 import os
+import json
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 import streamlit as st
+import pandas as pd
 from parsers import load_case, load_policies
 from agent import run_vendor_agent
 
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 BASE_PATH = str(Path(__file__).parent.parent)
+DOCS_PATH = Path(BASE_PATH) / "docs"
+CASES_PATH = Path(BASE_PATH) / "cases"
+AUDIT_LOG = Path(__file__).parent / "audit_log.json"
 
 load_dotenv(Path(__file__).parent / ".env")
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -19,53 +27,140 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-CASES = {
-    "Case 001 · Northstar Analytics": "case_001",
-    "Case 002 · Workspace Depot": "case_002",
-    "Case 003 · TalentPulse AI": "case_003",
+# ---------------------------------------------------------------------------
+# Static metadata
+# ---------------------------------------------------------------------------
+CASE_META = {
+    "case_001": {
+        "label": "Case 001 · Northstar Analytics",
+        "vendor": "Northstar Analytics",
+        "category": "SaaS AI Analytics",
+        "acv": 85_000,
+    },
+    "case_002": {
+        "label": "Case 002 · Workspace Depot",
+        "vendor": "Workspace Depot",
+        "category": "Office Supplies",
+        "acv": 12_000,
+    },
+    "case_003": {
+        "label": "Case 003 · TalentPulse AI",
+        "vendor": "TalentPulse AI",
+        "category": "HR AI",
+        "acv": 120_000,
+    },
 }
-RISK_EMOJI = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}
+
+CASE_ORDER = list(CASE_META.keys())
+
+RISK_COLOR = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}
 REC_LABELS = {
-    "ready_for_approval": "✅ Ready for approval routing",
-    "pending_information": "⏳ Pending — hold for info",
-    "escalate_to_human": "🔺 Escalate to human owner",
-    "blocked": "🚫 Blocked — do not proceed",
+    "ready_for_approval": "✅ Ready for Approval",
+    "pending_information": "⏳ Pending Information",
+    "escalate_to_human": "🔺 Escalate to Human",
+    "blocked": "🚫 Blocked",
+}
+
+POLICY_VERSIONS = {
+    "finance_approval_matrix": "v1.2.0",
+    "vendor_risk_policy": "v2.0.1",
+    "security_review_policy": "v1.5.3",
+    "legal_review_policy": "v1.1.2",
+    "data_handling_policy": "v2.3.0",
+    "procurement_policy": "v1.0.4",
+    "communication_policy": "v1.0.1",
+}
+
+FILE_ICONS = {".xlsx": "📊", ".csv": "📋", ".pdf": "📕", ".md": "📝", ".txt": "✉️"}
+
+CASE_MANIFESTS = {
+    "case_001": {
+        "title": "Case 001 · Northstar Analytics",
+        "description": "SaaS AI analytics vendor, high ACV, missing compliance docs, possible duplicate in register.",
+        "expected_risk": "high",
+        "expected_recommendation": "blocked",
+        "expected_blocking_count": 2,
+    },
+    "case_002": {
+        "title": "Case 002 · Workspace Depot",
+        "description": "Office supplies renewal, low ACV, no data access, two admin docs missing.",
+        "expected_risk": "low",
+        "expected_recommendation": "ready_for_approval",
+        "expected_blocking_count": 0,
+    },
+    "case_003": {
+        "title": "Case 003 · TalentPulse AI",
+        "description": "HR AI platform, high ACV, employee PII, EU+APAC subprocessors, AI training clause.",
+        "expected_risk": "high",
+        "expected_recommendation": "blocked",
+        "expected_blocking_count": 3,
+    },
 }
 
 # ---------------------------------------------------------------------------
 # Session state defaults
 # ---------------------------------------------------------------------------
-for _k, _v in {
-    "view": "home",
-    "result": None,
-    "case_id": None,
-    "submitted": False,
-    "human_decision": None,
-    "human_notes": "",
-    "history": [],
-    "active_history_idx": None,
-}.items():
+_DEFAULTS = {
+    "page": "Overview",
+    "analyses": {},
+    "decisions": {},
+    "hitl_state": {},
+    "selected_case": None,
+    "test_scores": [],
+}
+for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def write_audit_log(entry: dict):
+    if AUDIT_LOG.exists():
+        data = json.loads(AUDIT_LOG.read_text())
+    else:
+        data = {"entries": []}
+    data["entries"].append(entry)
+    AUDIT_LOG.write_text(json.dumps(data, indent=2))
+
+
+def get_hitl(case_id: str) -> dict:
+    if case_id not in st.session_state.hitl_state:
+        st.session_state.hitl_state[case_id] = {
+            "action": None,
+            "show_form": False,
+        }
+    return st.session_state.hitl_state[case_id]
+
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## Vendor Onboarding Agent")
+    st.markdown("## 🏢 Vendor Onboarding")
     st.caption("AI-assisted procurement triage")
     st.divider()
 
-    if st.button("← Overview", use_container_width=True):
-        st.session_state.view = "home"
+    page_choice = st.radio(
+        "Navigation",
+        ["Overview", "Knowledge Base", "Test Cases"],
+        index=["Overview", "Knowledge Base", "Test Cases"].index(st.session_state.page),
+        label_visibility="collapsed",
+    )
+    if page_choice != st.session_state.page:
+        st.session_state.page = page_choice
         st.rerun()
 
-    st.subheader("New Analysis")
-    selected_label = st.selectbox("case", list(CASES.keys()), label_visibility="collapsed")
-    case_id = CASES[selected_label]
+    st.divider()
+    st.subheader("Run Analysis")
+
+    labels = [m["label"] for m in CASE_META.values()]
+    selected_label = st.selectbox("Select case", labels, label_visibility="collapsed")
+    run_case_id = CASE_ORDER[labels.index(selected_label)]
 
     if not _API_KEY:
-        st.error("ANTHROPIC_API_KEY not set.")
+        st.error("ANTHROPIC_API_KEY not set in .env")
         can_run = False
     else:
         can_run = True
@@ -77,85 +172,27 @@ with st.sidebar:
         use_container_width=True,
     )
 
-    # ── History panel ──────────────────────────────────────────────────────
-    if st.session_state.history:
-        st.divider()
-        st.caption("📋 Previous Analyses")
-        for idx, entry in enumerate(st.session_state.history):
-            risk = entry.get("risk", "?")
-            emoji = RISK_EMOJI.get(risk, "⚪")
-            # Vendor name only (after the "Case 00X · " prefix)
-            vendor = entry["label"].split(" · ", 1)[-1]
-            submitted_mark = " ✓" if entry.get("submitted") else ""
-            btn_label = f"{emoji} {vendor}  {entry['timestamp']}{submitted_mark}"
-
-            is_active = idx == st.session_state.active_history_idx
-            if st.button(
-                btn_label,
-                key=f"hist_{idx}",
-                use_container_width=True,
-                type="primary" if is_active else "secondary",
-            ):
-                st.session_state.result = entry["result"]
-                st.session_state.case_id = entry["case_id"]
-                st.session_state.submitted = entry.get("submitted", False)
-                st.session_state.human_decision = entry.get("decision")
-                st.session_state.human_notes = entry.get("notes", "")
-                st.session_state.active_history_idx = idx
-                st.session_state.view = "analysis"
-                st.rerun()
-
     st.divider()
     st.caption(
         "**Agent may:** summarize, flag issues, draft messages, recommend routing.\n\n"
         "**Agent may NOT:** approve vendors, commit spend, send external comms."
     )
 
+
 # ---------------------------------------------------------------------------
 # Run agent
 # ---------------------------------------------------------------------------
 if run_btn and can_run:
-    with st.spinner(f"Parsing {selected_label} and running agent…"):
+    with st.spinner(f"Analyzing {selected_label}…"):
         try:
-            case_data = load_case(case_id, BASE_PATH)
+            case_data = load_case(run_case_id, BASE_PATH)
             policies = load_policies(BASE_PATH)
             result = run_vendor_agent(case_data, policies, _API_KEY)
-
-            triage = result.get("triage_output") or {}
-            risk = triage.get("risk_tier", "?").upper()
-            rec = triage.get("recommendation", "?")
-            timestamp = datetime.now().strftime("%H:%M")
-
-            entry = {
-                "case_id": case_id,
-                "label": selected_label,
-                "timestamp": timestamp,
-                "risk": risk,
-                "rec": rec,
-                "result": result,
-                "submitted": False,
-                "decision": None,
-                "notes": "",
-            }
-
-            # Replace existing entry for same case or prepend new one
-            existing = next(
-                (i for i, e in enumerate(st.session_state.history) if e["case_id"] == case_id),
-                None,
-            )
-            if existing is not None:
-                st.session_state.history[existing] = entry
-                st.session_state.active_history_idx = existing
-            else:
-                st.session_state.history.insert(0, entry)
-                st.session_state.active_history_idx = 0
-
-            st.session_state.result = result
-            st.session_state.case_id = case_id
-            st.session_state.submitted = False
-            st.session_state.human_decision = None
-            st.session_state.human_notes = ""
-            st.session_state.view = "analysis"
+            st.session_state.analyses[run_case_id] = result
+            st.session_state.selected_case = run_case_id
+            st.session_state.page = "Overview"
+            if run_case_id in st.session_state.hitl_state:
+                del st.session_state.hitl_state[run_case_id]
             st.rerun()
         except Exception as exc:
             st.error(f"Error: {exc}")
@@ -163,425 +200,506 @@ if run_btn and can_run:
 
 
 # ===========================================================================
-# HOME PAGE
+# OVERVIEW PAGE
 # ===========================================================================
-if st.session_state.view == "home":
+if st.session_state.page == "Overview":
 
-    st.markdown(
-        "<h1 style='margin-bottom:4px'>🏢 Vendor Onboarding Agent</h1>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "AI-assisted procurement triage — reviews vendor packages against internal policies "
-        "and produces structured recommendations for the human procurement owner."
-    )
-    st.divider()
-
-    st.subheader("How it works")
-
-    # Fix: all text inside step boxes uses explicit dark color so it's visible in both light & dark mode
-    STEP_TEXT = "#1a1a2e"
-    STEP_BODY = "#3d3d5c"
-
-    st.markdown(
-        f"""
-<div style="display:flex;align-items:flex-start;gap:0;margin:16px 0 24px 0;">
-
-  <div style="flex:1;background:#EEF2FF;border-radius:12px;padding:18px 14px;text-align:center;min-height:175px;">
-    <div style="font-size:2em">📄</div>
-    <div style="color:{STEP_TEXT};font-weight:700;font-size:1em;margin:8px 0 4px">1 · Parse</div>
-    <div style="color:{STEP_BODY};font-size:0.82em;line-height:1.6">
-      Intake form <em>xlsx</em><br>Quote <em>csv</em><br>Contract <em>pdf</em><br>Security Q <em>md</em><br>Vendor email <em>txt</em>
-    </div>
-  </div>
-
-  <div style="color:#aaa;font-size:1.8em;padding:60px 6px 0">›</div>
-
-  <div style="flex:1;background:#F0FFF4;border-radius:12px;padding:18px 14px;text-align:center;min-height:175px;">
-    <div style="font-size:2em">🔧</div>
-    <div style="color:{STEP_TEXT};font-weight:700;font-size:1em;margin:8px 0 4px">2 · Tools</div>
-    <div style="color:{STEP_BODY};font-size:0.82em;line-height:1.6">
-      Budget lookup<br>Vendor register<br>Contract value<br>Data sensitivity<br>
-      <strong style="color:{STEP_TEXT}">Contract clauses ✦</strong><br>
-      <strong style="color:{STEP_TEXT}">Cross-doc check ✦</strong>
-    </div>
-  </div>
-
-  <div style="color:#aaa;font-size:1.8em;padding:60px 6px 0">›</div>
-
-  <div style="flex:1;background:#FFFBF0;border-radius:12px;padding:18px 14px;text-align:center;min-height:175px;">
-    <div style="font-size:2em">📋</div>
-    <div style="color:{STEP_TEXT};font-weight:700;font-size:1em;margin:8px 0 4px">3 · Policy</div>
-    <div style="color:{STEP_BODY};font-size:0.82em;line-height:1.6">
-      Finance matrix<br>Legal triggers<br>Security rules<br>Vendor risk tiers<br>Data handling<br>Comms policy
-    </div>
-  </div>
-
-  <div style="color:#aaa;font-size:1.8em;padding:60px 6px 0">›</div>
-
-  <div style="flex:1;background:#FFF5F5;border-radius:12px;padding:18px 14px;text-align:center;min-height:175px;">
-    <div style="font-size:2em">📊</div>
-    <div style="color:{STEP_TEXT};font-weight:700;font-size:1em;margin:8px 0 4px">4 · Output</div>
-    <div style="color:{STEP_BODY};font-size:0.82em;line-height:1.6">
-      Risk tier<br>Missing docs<br>Blocking issues<br>Approval routing<br>Contract flags<br>Draft comms
-    </div>
-  </div>
-
-  <div style="color:#aaa;font-size:1.8em;padding:60px 6px 0">›</div>
-
-  <div style="flex:1;background:#F5F0FF;border-radius:12px;padding:18px 14px;text-align:center;min-height:175px;">
-    <div style="font-size:2em">👤</div>
-    <div style="color:{STEP_TEXT};font-weight:700;font-size:1em;margin:8px 0 4px">5 · Approve</div>
-    <div style="color:{STEP_BODY};font-size:0.82em;line-height:1.6">
-      Human reviews<br>Edits drafts<br>Records decision<br>Routes to:<br>Legal · Finance<br>Security · Owner
-    </div>
-  </div>
-
-</div>
-<p style="font-size:0.78em;color:#888;margin-top:-8px">✦ New tools added in v2</p>
-""",
-        unsafe_allow_html=True,
-    )
-
-    st.divider()
-    st.subheader("Test Cases")
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        st.markdown(
-            """
-<div style="background:#fff5f5;border-left:5px solid #e53e3e;border-radius:10px;padding:18px;">
-  <div style="font-size:0.75em;color:#999;font-weight:600;letter-spacing:.05em">CASE 001</div>
-  <div style="font-size:1.15em;font-weight:700;color:#1a1a2e;margin:4px 0 2px">Northstar Analytics</div>
-  <div style="font-size:0.82em;color:#555">SaaS AI · $85,000/yr · 24 months · Net 60</div>
-  <div style="margin:10px 0"><span style="background:#e53e3e;color:#fff;padding:2px 10px;border-radius:20px;font-size:0.75em;font-weight:600">HIGH RISK</span></div>
-  <div style="font-size:0.82em;color:#444;line-height:1.7">
-    ✗ Missing SOC 2 Type II<br>✗ Missing DPA<br>⚠ EU subprocessor (Clearbit)<br>⚠ Ambiguous AI training clause<br>⚠ Possible duplicate in register<br>⚠ Net 60 → VP Finance review
-  </div>
-</div>""",
-            unsafe_allow_html=True,
-        )
-
-    with c2:
-        st.markdown(
-            """
-<div style="background:#f0fff4;border-left:5px solid #38a169;border-radius:10px;padding:18px;">
-  <div style="font-size:0.75em;color:#999;font-weight:600;letter-spacing:.05em">CASE 002</div>
-  <div style="font-size:1.15em;font-weight:700;color:#1a1a2e;margin:4px 0 2px">Workspace Depot</div>
-  <div style="font-size:0.82em;color:#555">Office Supplies · $12,000/yr · 12 months · Net 30</div>
-  <div style="margin:10px 0"><span style="background:#38a169;color:#fff;padding:2px 10px;border-radius:20px;font-size:0.75em;font-weight:600">LOW RISK</span></div>
-  <div style="font-size:0.82em;color:#444;line-height:1.7">
-    ✓ Existing vendor renewal<br>✓ No system access or data<br>✗ Missing tax form (W-9)<br>✗ Missing vendor setup form<br>⚠ Budget $18K vs ACV $12K — tight<br>⚠ Business owner approval only
-  </div>
-</div>""",
-            unsafe_allow_html=True,
-        )
-
-    with c3:
-        st.markdown(
-            """
-<div style="background:#fffaf0;border-left:5px solid #dd6b20;border-radius:10px;padding:18px;">
-  <div style="font-size:0.75em;color:#999;font-weight:600;letter-spacing:.05em">CASE 003</div>
-  <div style="font-size:1.15em;font-weight:700;color:#1a1a2e;margin:4px 0 2px">TalentPulse AI</div>
-  <div style="font-size:0.82em;color:#555">HR AI · $120,000/yr · 36 months · Net 90</div>
-  <div style="margin:10px 0"><span style="background:#dd6b20;color:#fff;padding:2px 10px;border-radius:20px;font-size:0.75em;font-weight:600">BLOCKED</span></div>
-  <div style="font-size:0.82em;color:#444;line-height:1.7">
-    ✗ Missing SOC 2 Type II<br>✗ Missing DPA<br>✗ AI opt-out not in quote<br>⚠ EU + APAC subprocessors<br>⚠ Net 90 → VP Finance + Legal<br>⚠ Employee salary / performance PII<br>⚠ 5 required approvers + Executive
-  </div>
-</div>""",
-            unsafe_allow_html=True,
-        )
-
-    st.divider()
-    st.info("Select a case in the sidebar and click **▶ Run Agent Analysis** to begin.")
-
-
-# ===========================================================================
-# ANALYSIS PAGE
-# ===========================================================================
-elif st.session_state.view == "analysis":
-
-    result = st.session_state.result
-    if not result:
-        st.info("Run the agent analysis first using the sidebar.")
-        st.stop()
-
-    triage = result.get("triage_output")
-    if not triage:
-        st.error("Agent did not produce a triage output.")
-        st.json(result)
-        st.stop()
-
-    # Header: show which case is currently displayed
-    active_label = next(
-        (e["label"] for e in st.session_state.history if e["case_id"] == st.session_state.case_id),
-        st.session_state.case_id,
-    )
-    st.markdown(f"### {active_label}")
-
-    risk = triage.get("risk_tier", "unknown").upper()
-    rec = triage.get("recommendation", "unknown")
-    n_blocking = len(triage.get("blocking_issues") or [])
-    n_missing = len(triage.get("missing_documents") or [])
-    n_consistency = len(triage.get("consistency_issues") or [])
-    n_contract = len(triage.get("contract_legal_flags") or [])
-    n_tools = len(result.get("tool_calls", []))
-
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Risk Tier", risk)
-    col2.metric("Blocking Issues", n_blocking)
-    col3.metric("Missing Documents", n_missing)
-    col4.metric("Consistency Issues", n_consistency)
-    col5.metric("Contract Flags", n_contract)
-
-    st.markdown(
-        f"**Agent recommendation:** {REC_LABELS.get(rec, rec)} &nbsp;·&nbsp; {n_tools} tool calls",
-        unsafe_allow_html=True,
-    )
-    st.divider()
-
-    tabs = st.tabs([
-        "📋 Summary & Flags",
-        "✅ Approval Routing",
-        "📂 Missing Documents",
-        "📑 Contract Analysis",
-        "✉️ Draft Communications",
-        "🔧 Tool Call Log",
-        "👤 Human Approval Gate",
-    ])
-
-    # ── Tab 0: Summary & Flags ────────────────────────────────────────────
-    with tabs[0]:
-        st.subheader("Triage Summary")
-        st.write(triage.get("summary", ""))
-
-        blocking = triage.get("blocking_issues") or []
-        if blocking:
-            st.error(f"**{len(blocking)} Blocking Issue(s)** — request cannot proceed as-is:")
-            for issue in blocking:
-                st.markdown(f"- {issue}")
-
-        consistency = triage.get("consistency_issues") or []
-        if consistency:
-            st.warning(f"**{len(consistency)} Cross-Document Inconsistency(ies):**")
-            for issue in consistency:
-                st.markdown(f"- {issue}")
-
-        st.subheader("Policy Flags")
-        flags = triage.get("policy_flags") or []
-        if flags:
-            for flag in flags:
-                sev = flag.get("severity", "info")
-                label = f"**[{flag['policy']}]** {flag['issue']}"
-                if sev == "blocking":
-                    st.error(label)
-                elif sev == "warning":
-                    st.warning(label)
-                else:
-                    st.info(label)
+    # Build pipeline dataframe
+    rows = []
+    for case_id, meta in CASE_META.items():
+        result = st.session_state.analyses.get(case_id)
+        decision = st.session_state.decisions.get(case_id)
+        if result:
+            triage = result.get("triage_output") or {}
+            risk_raw = triage.get("risk_tier", "?").upper()
+            risk = f"{RISK_COLOR.get(risk_raw, '⚪')} {risk_raw}"
+            rec_raw = triage.get("recommendation", "?")
+            rec = REC_LABELS.get(rec_raw, rec_raw.replace("_", " ").title())
+            status = "Reviewed" if decision else "Analyzed"
         else:
-            st.success("No policy flags raised.")
+            risk = "—"
+            rec = "—"
+            status = "Pending"
+        rows.append({
+            "Case": meta["label"].split(" · ")[0],
+            "Vendor": meta["vendor"],
+            "Category": meta["category"],
+            "ACV": f"${meta['acv']:,}",
+            "Risk": risk,
+            "Recommendation": rec,
+            "Status": status,
+        })
 
-    # ── Tab 1: Approval Routing ───────────────────────────────────────────
-    with tabs[1]:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Required Sign-offs")
-            for a in triage.get("required_approvals") or []:
-                st.markdown(f"- ✅ **{a}**")
-        with col2:
-            st.subheader("Required Reviews")
-            for r in triage.get("required_reviews") or []:
-                st.markdown(f"- 🔍 **{r}**")
+    df = pd.DataFrame(rows)
 
-    # ── Tab 2: Missing Documents ──────────────────────────────────────────
-    with tabs[2]:
-        missing = triage.get("missing_documents") or []
-        if missing:
-            st.warning(f"{len(missing)} document(s) missing or incomplete:")
-            for doc in missing:
-                st.markdown(f"- {doc}")
-        else:
-            st.success("All required documents are present.")
+    col_left, col_right = st.columns([2, 3], gap="large")
 
-    # ── Tab 3: Contract Analysis ──────────────────────────────────────────
-    with tabs[3]:
-        st.subheader("Contract Clause Extraction")
+    # ── Left: Pipeline Table ───────────────────────────────────────────────
+    with col_left:
+        n_analyzed = sum(1 for r in rows if r["Status"] != "Pending")
+        st.markdown("### Vendor Pipeline")
+        st.caption(f"{n_analyzed} of {len(rows)} cases analyzed")
 
-        contract_result = next(
-            (c["output"] for c in result.get("tool_calls", []) if c["tool"] == "extract_contract_clauses"),
-            None,
+        event = st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            selection_mode="single-row",
+            on_select="rerun",
+            key="pipeline_table",
         )
 
-        if contract_result:
-            legal_flags = contract_result.get("all_legal_flags") or []
-            if legal_flags:
-                st.error(f"**{len(legal_flags)} Legal Flag(s) detected in contract:**")
-                for f in legal_flags:
-                    st.markdown(f"- {f}")
-            else:
-                st.success("No non-standard legal clauses detected.")
+        selected_rows = (
+            event.selection.rows
+            if event.selection and hasattr(event.selection, "rows")
+            else []
+        )
+        if selected_rows:
+            st.session_state.selected_case = CASE_ORDER[selected_rows[0]]
 
-            st.divider()
-            st.subheader("Clause-by-Clause Findings")
+        with st.expander("ℹ️ How it works", expanded=False):
+            st.markdown(
+                """
+**1 · Parse** — xlsx intake, csv quote, pdf contract, md security questionnaire, txt vendor email
 
-            regions = contract_result.get("subprocessor_regions_detected") or []
-            if regions:
-                st.warning(f"Subprocessor regions detected in contract: {', '.join(regions)}")
+**2 · Tools** — budget lookup · vendor register · TCV calculation · data sensitivity
+classification · contract clause extraction · cross-document validation
 
-            clauses = {
-                "AI / Model Training": contract_result.get("ai_model_training"),
-                "Auto-Renewal": contract_result.get("auto_renewal"),
-                "Limitation of Liability": contract_result.get("limitation_of_liability"),
-                "Governing Law": contract_result.get("governing_law"),
-                "Data Retention": contract_result.get("data_retention_clause"),
-                "Termination Rights": contract_result.get("termination_rights"),
-                "DPA Reference": contract_result.get("data_processing_agreement_ref"),
-                "Subprocessor Clause": contract_result.get("subprocessor_clause"),
-            }
-            for clause_name, clause_data in clauses.items():
-                if not clause_data:
-                    continue
-                found = clause_data.get("found", False)
-                icon = "🔴" if (not found and clause_name == "DPA Reference") else ("✓" if found else "–")
-                with st.expander(f"{icon} {clause_name} — {'found' if found else 'not detected'}"):
-                    if found and clause_data.get("excerpt"):
-                        st.code(clause_data["excerpt"], language=None)
-                    for flag in clause_data.get("flags") or []:
-                        st.warning(flag)
-                    if not found:
-                        st.caption("Pattern not found in contract text.")
+**3 · Policy** — finance approval matrix · legal triggers · security rules · data handling · comms policy
+
+**4 · Generate** — risk tier, missing docs, blocking issues, approval routing, contract flags,
+draft communications  *(Generator-Critic reflection for medium/high risk)*
+
+**5 · Approve** — human reviews AI recommendation, edits drafts, records decision
+"""
+            )
+
+    # ── Right: Detail Drawer ───────────────────────────────────────────────
+    with col_right:
+        selected_case = st.session_state.selected_case
+
+        if not selected_case:
+            st.markdown("### Detail Drawer")
+            st.info("Select a row from the pipeline table to view analysis details.")
+            st.stop()
+
+        meta = CASE_META[selected_case]
+        result = st.session_state.analyses.get(selected_case)
+
+        st.markdown(f"### {meta['label']}")
+        st.caption(f"{meta['category']} · ${meta['acv']:,} ACV/yr")
+
+        if not result:
+            st.info(
+                "No analysis yet. Select this case in the sidebar and click **▶ Run Agent Analysis**."
+            )
+            st.stop()
+
+        triage = result.get("triage_output") or {}
+        pre_screen = result.get("pre_screen") or {}
+        reflection = result.get("reflection")
+        tool_calls = result.get("tool_calls", [])
+
+        risk_raw = triage.get("risk_tier", "?").upper()
+        rec_raw = triage.get("recommendation", "?")
+
+        # Metrics row
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Risk", f"{RISK_COLOR.get(risk_raw, '⚪')} {risk_raw}")
+        m2.metric("Blocking", len(triage.get("blocking_issues") or []))
+        m3.metric("Missing Docs", len(triage.get("missing_documents") or []))
+        m4.metric("Tool Calls", len(tool_calls))
+
+        st.markdown(f"**{REC_LABELS.get(rec_raw, rec_raw)}**")
+
+        # Pre-screen badge
+        screen_result = pre_screen.get("screen_result", "")
+        if screen_result == "block":
+            st.error(
+                f"⛔ Pre-screen: BLOCK — {len(pre_screen.get('block_reasons', []))} deterministic block condition(s) detected"
+            )
+        elif screen_result == "escalate":
+            st.warning(
+                f"⚠️ Pre-screen: ESCALATE — {len(pre_screen.get('escalate_reasons', []))} escalation trigger(s) detected"
+            )
         else:
-            st.info("Contract clause extraction tool was not called in this run.")
+            st.success("✅ Pre-screen: No immediate block or escalate triggers")
 
         st.divider()
-        st.subheader("Cross-Document Consistency Check")
-        consistency_result = next(
-            (c["output"] for c in result.get("tool_calls", []) if c["tool"] == "validate_cross_document_consistency"),
-            None,
-        )
-        if consistency_result:
-            issues = consistency_result.get("issues") or []
-            if not issues:
-                st.success("All cross-document checks passed.")
-            else:
-                for issue in issues:
-                    sev = issue.get("severity", "info")
-                    desc = issue.get("description", "")
+
+        # Analysis tabs
+        tab_labels = ["📋 Analysis", "🔄 Reflection Log", "🔧 Tool Log", "✉️ Drafts"]
+        atab0, atab1, atab2, atab3 = st.tabs(tab_labels)
+
+        # ── Tab 0: Analysis ────────────────────────────────────────────────
+        with atab0:
+            st.write(triage.get("summary", ""))
+
+            blocking = triage.get("blocking_issues") or []
+            if blocking:
+                st.error(f"**{len(blocking)} Blocking Issue(s)** — request cannot proceed as-is:")
+                for b in blocking:
+                    st.markdown(f"- {b}")
+
+            consistency = triage.get("consistency_issues") or []
+            if consistency:
+                st.warning(f"**{len(consistency)} Cross-Document Inconsistency(ies):**")
+                for c in consistency:
+                    st.markdown(f"- {c}")
+
+            flags = triage.get("policy_flags") or []
+            if flags:
+                st.subheader("Policy Flags")
+                for flag in flags:
+                    sev = flag.get("severity", "info")
+                    label = f"**[{flag['policy']}]** {flag['issue']}"
                     if sev == "blocking":
-                        st.error(f"**[{issue['type']}]** {desc}")
+                        st.error(label)
                     elif sev == "warning":
-                        st.warning(f"**[{issue['type']}]** {desc}")
+                        st.warning(label)
                     else:
-                        st.info(f"**[{issue['type']}]** {desc}")
-        else:
-            st.info("Cross-document consistency check was not called in this run.")
+                        st.info(label)
 
-    # ── Tab 4: Draft Communications ───────────────────────────────────────
-    with tabs[4]:
-        followup = triage.get("draft_vendor_followup", "")
-        ticket = triage.get("draft_internal_ticket", "")
-        if followup:
-            st.subheader("DRAFT: Vendor Follow-up Email")
-            st.caption("⚠️ DRAFT — requires human review and approval before sending.")
-            st.text_area("", followup, height=280, key="followup_area")
-        else:
-            st.info("No vendor follow-up email needed.")
-        if ticket:
-            st.subheader("DRAFT: Internal Procurement Ticket")
-            st.text_area("", ticket, height=220, key="ticket_area")
-
-    # ── Tab 5: Tool Call Log ──────────────────────────────────────────────
-    with tabs[5]:
-        calls = result.get("tool_calls", [])
-        st.subheader(f"Tool Calls ({len(calls)})")
-        for i, call in enumerate(calls, 1):
-            with st.expander(f"{i}. {call['tool']}"):
-                c_in, c_out = st.columns(2)
-                with c_in:
-                    st.caption("Input")
-                    st.json(call["input"])
-                with c_out:
-                    st.caption("Output")
-                    st.json(call["output"])
-
-    # ── Tab 6: Human Approval Gate ────────────────────────────────────────
-    with tabs[6]:
-        st.subheader("Human Approval Gate")
-        st.info(
-            "As the procurement owner, you have reviewed the analysis above. "
-            "Your decision is required before any routing or external communications proceed."
-        )
-        st.markdown(f"**Agent recommendation:** {REC_LABELS.get(rec, rec)}")
-        st.divider()
-
-        def _update_history_entry(**kwargs):
-            idx = st.session_state.active_history_idx
-            if idx is not None and idx < len(st.session_state.history):
-                st.session_state.history[idx].update(kwargs)
-
-        if st.session_state.submitted:
-            decision = st.session_state.human_decision
-            notes = st.session_state.human_notes
-            st.success(f"Decision recorded: **{decision}**")
-            if notes:
-                st.markdown(f"**Notes:** {notes}")
-
-            st.divider()
-            st.subheader("What happens next")
             approvals = triage.get("required_approvals") or []
             reviews = triage.get("required_reviews") or []
-            review_icons = {"Legal": "⚖️", "Security": "🔒", "Finance": "💰", "VP Finance": "💰", "FP&A": "💰"}
+            if approvals or reviews:
+                st.subheader("Required Approvals & Reviews")
+                ac1, ac2 = st.columns(2)
+                with ac1:
+                    st.caption("Sign-offs")
+                    for a in approvals:
+                        st.markdown(f"- ✅ {a}")
+                with ac2:
+                    st.caption("Reviews")
+                    for r in reviews:
+                        st.markdown(f"- 🔍 {r}")
 
-            if "Approve" in decision:
-                st.markdown("**This case will be routed to:**")
-                if reviews:
-                    cols = st.columns(min(len(reviews), 4))
-                    for i, rev in enumerate(reviews):
-                        icon = next((v for k, v in review_icons.items() if k in rev), "🔍")
-                        cols[i % len(cols)].metric(f"{icon} {rev.split(' (')[0]}", "Review pending")
-                st.markdown("**Sign-off chain:**")
-                st.markdown(" → ".join(f"**{a}**" for a in approvals))
-                if triage.get("draft_vendor_followup"):
-                    st.markdown("**Pending:** Vendor follow-up email (review draft in Communications tab before sending)")
+            contract_flags = triage.get("contract_legal_flags") or []
+            if contract_flags:
+                st.subheader("Contract Legal Flags")
+                for f in contract_flags:
+                    st.warning(f"- {f}")
 
-            elif "Request more information" in decision:
-                st.markdown("**Next step:** Review and send the draft vendor follow-up email (Communications tab).")
-                st.markdown("**Case status:** On hold — awaiting vendor response before re-triage.")
+            missing = triage.get("missing_documents") or []
+            if missing:
+                st.subheader("Missing Documents")
+                for d in missing:
+                    st.markdown(f"- 📄 {d}")
 
-            elif "Reject" in decision:
-                st.markdown("**Next step:** Notify the requester with the reason below.")
-                st.code(notes or "(no reason provided)", language=None)
+        # ── Tab 1: Reflection Log ─────────────────────────────────────────
+        with atab1:
+            if not reflection:
+                st.info(
+                    "Reflection (Generator-Critic) log is only produced for **medium** and "
+                    "**high** risk cases. Run a medium/high-risk case to see a critic review."
+                )
+            else:
+                gen = reflection.get("generator", {})
+                critic = reflection.get("critic", {})
+                final = reflection.get("final", {})
 
-            elif "Escalate" in decision:
-                st.markdown("**Next step:** Flag for senior procurement review.")
-                st.code(notes or "(no notes provided)", language=None)
+                agree_icon = {"agree": "🟢", "partial": "🟡", "disagree": "🔴"}.get(
+                    critic.get("agreement_level", "agree"), "⚪"
+                )
+                conf = critic.get("confidence", "?")
+                risk_assess = critic.get("risk_assessment", "agree")
 
-            st.divider()
-            if st.button("Reset decision"):
-                st.session_state.submitted = False
-                _update_history_entry(submitted=False, decision=None, notes="")
+                st.markdown(
+                    f"**Critic verdict:** {agree_icon} {critic.get('agreement_level', '?').title()} "
+                    f"· **Confidence:** {conf}% · **Risk assessment:** {risk_assess.replace('_', ' ').title()}"
+                )
+                st.write(critic.get("summary", ""))
+                st.divider()
+
+                rc1, rc2 = st.columns(2)
+                with rc1:
+                    st.subheader("Generator")
+                    st.caption(
+                        f"Risk: {gen.get('risk_tier', '?').upper()} · {gen.get('recommendation', '?').replace('_', ' ')}"
+                    )
+                    for f in gen.get("key_findings", []):
+                        if f:
+                            st.markdown(f"- {f}")
+
+                with rc2:
+                    st.subheader("Critic")
+                    confirmed = critic.get("confirmed_findings", [])
+                    missed = critic.get("missed_findings", [])
+                    over = critic.get("over_flagged", [])
+                    if confirmed:
+                        st.caption("✓ Confirmed findings:")
+                        for f in confirmed:
+                            st.markdown(f"- {f}")
+                    if missed:
+                        st.caption("⚠ Missed / under-weighted:")
+                        for f in missed:
+                            st.markdown(f"- {f}")
+                    if over:
+                        st.caption("↓ Over-flagged:")
+                        for f in over:
+                            st.markdown(f"- {f}")
+
+                if final.get("adjustments"):
+                    with st.expander("Final adjustments from critic"):
+                        for adj in final["adjustments"]:
+                            st.markdown(f"- {adj}")
+
+        # ── Tab 2: Tool Call Log ──────────────────────────────────────────
+        with atab2:
+            st.caption(f"{len(tool_calls)} tool calls executed")
+            for i, call in enumerate(tool_calls, 1):
+                with st.expander(f"{i}. {call['tool']}"):
+                    tc1, tc2 = st.columns(2)
+                    with tc1:
+                        st.caption("Input")
+                        st.json(call["input"])
+                    with tc2:
+                        st.caption("Output")
+                        st.json(call["output"])
+
+        # ── Tab 3: Drafts ─────────────────────────────────────────────────
+        with atab3:
+            followup = triage.get("draft_vendor_followup", "")
+            ticket = triage.get("draft_internal_ticket", "")
+            if followup:
+                st.warning("⚠️ DRAFT — requires human approval before sending")
+                st.subheader("Vendor Follow-up Email")
+                st.text_area("", followup, height=240, key=f"followup_{selected_case}")
+            if ticket:
+                st.subheader("Internal Procurement Ticket")
+                st.text_area("", ticket, height=180, key=f"ticket_{selected_case}")
+            if not followup and not ticket:
+                st.info("No draft communications generated for this case.")
+
+        # ── HITL Action Buttons ───────────────────────────────────────────
+        st.divider()
+        st.subheader("Human Decision")
+
+        hitl = get_hitl(selected_case)
+        decision = st.session_state.decisions.get(selected_case)
+
+        if decision:
+            action_labels = {
+                "approve": "✅ Approved AI Suggestion",
+                "modify": "✏️ Modified & Accepted",
+                "reject": "❌ Rejected",
+                "draft_email": "📧 Sent for Draft Email Review",
+            }
+            st.success(f"**Decision recorded:** {action_labels.get(decision['action'], decision['action'])}")
+            if decision.get("justification"):
+                st.markdown(f"**Justification:** {decision['justification']}")
+            st.caption(f"Recorded at {decision['timestamp']}")
+            if st.button("↩ Reset decision", key=f"reset_{selected_case}"):
+                del st.session_state.decisions[selected_case]
+                if selected_case in st.session_state.hitl_state:
+                    del st.session_state.hitl_state[selected_case]
                 st.rerun()
+
+        elif hitl.get("show_form"):
+            action = hitl["action"]
+            action_title = {
+                "modify": "✏️ Modify & Accept — provide justification",
+                "reject": "❌ Reject — provide reason",
+                "draft_email": "📧 Send for Draft Email Review — add notes",
+            }.get(action, action)
+            st.markdown(f"**{action_title}**")
+
+            justification = st.text_area(
+                "Justification / notes (required):",
+                key=f"just_{selected_case}",
+                height=100,
+            )
+            bc1, bc2 = st.columns(2)
+            with bc1:
+                if st.button("✓ Confirm", type="primary", key=f"confirm_{selected_case}"):
+                    if not justification.strip():
+                        st.error("Justification is required.")
+                    else:
+                        now = datetime.now()
+                        entry = {
+                            "case_id": selected_case,
+                            "vendor": meta["vendor"],
+                            "action": action,
+                            "justification": justification,
+                            "timestamp": now.isoformat(),
+                            "ai_recommendation": rec_raw,
+                            "risk_tier": risk_raw,
+                        }
+                        write_audit_log(entry)
+                        st.session_state.decisions[selected_case] = {
+                            "action": action,
+                            "justification": justification,
+                            "timestamp": now.strftime("%H:%M %b %d"),
+                        }
+                        del st.session_state.hitl_state[selected_case]
+                        st.rerun()
+            with bc2:
+                if st.button("Cancel", key=f"cancel_{selected_case}"):
+                    hitl["show_form"] = False
+                    st.rerun()
 
         else:
-            decision = st.radio(
-                "Your decision:",
-                [
-                    "Approve routing — forward to required reviewers",
-                    "Request more information — hold for vendor response",
-                    "Reject — return to requester with reason",
-                    "Escalate — flag for senior procurement review",
-                ],
-                key="human_decision_radio",
-            )
-            notes = st.text_area(
-                "Notes / reason (required for Reject or Escalate):",
-                height=100,
-                key="human_notes_area",
-            )
-            if st.button("Submit Decision", type="primary"):
-                st.session_state.human_decision = decision
-                st.session_state.human_notes = notes
-                st.session_state.submitted = True
-                _update_history_entry(submitted=True, decision=decision, notes=notes)
-                st.rerun()
+            st.caption(f"AI recommendation: **{REC_LABELS.get(rec_raw, rec_raw)}**")
+            btn1, btn2, btn3, btn4 = st.columns(4)
+            with btn1:
+                if st.button("✅ Approve", use_container_width=True, key=f"approve_{selected_case}"):
+                    now = datetime.now()
+                    write_audit_log({
+                        "case_id": selected_case,
+                        "vendor": meta["vendor"],
+                        "action": "approve",
+                        "justification": "Approved AI suggestion without modification",
+                        "timestamp": now.isoformat(),
+                        "ai_recommendation": rec_raw,
+                        "risk_tier": risk_raw,
+                    })
+                    st.session_state.decisions[selected_case] = {
+                        "action": "approve",
+                        "justification": "",
+                        "timestamp": now.strftime("%H:%M %b %d"),
+                    }
+                    st.rerun()
+            with btn2:
+                if st.button("✏️ Modify", use_container_width=True, key=f"modify_{selected_case}"):
+                    hitl["action"] = "modify"
+                    hitl["show_form"] = True
+                    st.rerun()
+            with btn3:
+                if st.button("📧 Draft Email", use_container_width=True, key=f"email_{selected_case}"):
+                    hitl["action"] = "draft_email"
+                    hitl["show_form"] = True
+                    st.rerun()
+            with btn4:
+                if st.button("❌ Reject", use_container_width=True, key=f"reject_{selected_case}"):
+                    hitl["action"] = "reject"
+                    hitl["show_form"] = True
+                    st.rerun()
+
+
+# ===========================================================================
+# KNOWLEDGE BASE PAGE
+# ===========================================================================
+elif st.session_state.page == "Knowledge Base":
+
+    st.markdown("## Knowledge Base")
+    st.caption("Internal procurement policies referenced by the agent during triage.")
+    st.divider()
+
+    policy_files = sorted(DOCS_PATH.glob("*.md"))
+
+    if not policy_files:
+        st.error(f"No policy documents found at {DOCS_PATH}")
+    else:
+        for pf in policy_files:
+            name = pf.stem
+            title = name.replace("_", " ").title()
+            version = POLICY_VERSIONS.get(name, "v1.0.0")
+            content = pf.read_text()
+
+            with st.expander(f"📄 {title}  ·  `{version}`", expanded=False):
+                st.markdown(content)
+
+
+# ===========================================================================
+# TEST CASES PAGE
+# ===========================================================================
+elif st.session_state.page == "Test Cases":
+
+    st.markdown("## Test Cases & Evaluation")
+    st.caption("Vendor onboarding packages included in this package, with expected agent outcomes.")
+    st.divider()
+
+    for case_id, manifest in CASE_MANIFESTS.items():
+        result = st.session_state.analyses.get(case_id)
+        status_badge = ""
+        if result:
+            triage = result.get("triage_output") or {}
+            risk_raw = triage.get("risk_tier", "?").upper()
+            status_badge = f"  ·  {RISK_COLOR.get(risk_raw, '⚪')} {risk_raw}"
+
+        with st.expander(f"**{manifest['title']}**{status_badge}", expanded=True):
+            st.caption(manifest["description"])
+            tc1, tc2 = st.columns([1, 2])
+
+            with tc1:
+                st.markdown("**Expected outcomes**")
+                st.markdown(f"- Risk tier: `{manifest['expected_risk']}`")
+                st.markdown(f"- Recommendation: `{manifest['expected_recommendation']}`")
+                st.markdown(f"- Min blocking issues: `{manifest['expected_blocking_count']}`")
+
+                if result:
+                    triage = result.get("triage_output") or {}
+                    actual_risk = triage.get("risk_tier", "?")
+                    actual_rec = triage.get("recommendation", "?")
+                    actual_blocking = len(triage.get("blocking_issues") or [])
+                    st.markdown("**Actual results**")
+                    st.markdown(
+                        f"- Risk: {'✅' if actual_risk == manifest['expected_risk'] else '❌'} `{actual_risk}`"
+                    )
+                    st.markdown(
+                        f"- Rec: {'✅' if actual_rec == manifest['expected_recommendation'] else '❌'} `{actual_rec}`"
+                    )
+                    st.markdown(
+                        f"- Blocking: {'✅' if actual_blocking >= manifest['expected_blocking_count'] else '❌'} `{actual_blocking}`"
+                    )
+
+            with tc2:
+                st.markdown("**File manifest**")
+                case_dir = CASES_PATH / case_id
+                if case_dir.exists():
+                    for fpath in sorted(case_dir.iterdir()):
+                        icon = FILE_ICONS.get(fpath.suffix, "📄")
+                        size_kb = fpath.stat().st_size / 1024
+                        st.markdown(f"{icon} `{fpath.name}` &nbsp; {size_kb:.1f} KB")
+                else:
+                    st.warning(f"Case directory not found: {case_dir}")
+
+    st.divider()
+    st.subheader("Batch Evaluation")
+
+    analyzed = [cid for cid in CASE_ORDER if cid in st.session_state.analyses]
+    unanalyzed = [cid for cid in CASE_ORDER if cid not in st.session_state.analyses]
+
+    if unanalyzed:
+        st.warning(
+            f"{len(unanalyzed)} case(s) not yet analyzed: "
+            + ", ".join(CASE_META[c]["vendor"] for c in unanalyzed)
+        )
+
+    if st.button(
+        "▶ Run Evaluation on All Analyzed Cases",
+        type="primary",
+        disabled=len(analyzed) == 0,
+    ):
+        scores = []
+        for case_id in analyzed:
+            manifest = CASE_MANIFESTS[case_id]
+            triage = (st.session_state.analyses[case_id].get("triage_output") or {})
+            actual_risk = triage.get("risk_tier", "?")
+            actual_rec = triage.get("recommendation", "?")
+            actual_blocking = len(triage.get("blocking_issues") or [])
+
+            risk_ok = actual_risk == manifest["expected_risk"]
+            rec_ok = actual_rec == manifest["expected_recommendation"]
+            block_ok = actual_blocking >= manifest["expected_blocking_count"]
+            score = sum([risk_ok, rec_ok, block_ok])
+
+            scores.append({
+                "Case": manifest["title"].split(" · ")[0],
+                "Vendor": manifest["title"].split(" · ", 1)[-1],
+                "Risk ✓": "✅" if risk_ok else f"❌  got `{actual_risk}`",
+                "Rec ✓": "✅" if rec_ok else f"❌  got `{actual_rec}`",
+                "Blocking ✓": "✅" if block_ok else f"❌  got {actual_blocking}",
+                "Score": f"{score}/3",
+            })
+        st.session_state.test_scores = scores
+
+    if st.session_state.test_scores:
+        scores = st.session_state.test_scores
+        passed = sum(1 for s in scores if s["Score"] == "3/3")
+        st.metric("Cases passing all checks", f"{passed}/{len(scores)}")
+        st.dataframe(
+            pd.DataFrame(scores),
+            use_container_width=True,
+            hide_index=True,
+        )

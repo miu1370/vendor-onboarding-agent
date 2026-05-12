@@ -388,6 +388,80 @@ def validate_cross_document_consistency(
 
 
 # ---------------------------------------------------------------------------
+# NEW: Pre-screen (deterministic short-circuit before LLM)
+# ---------------------------------------------------------------------------
+
+def pre_screen_case(intake: dict, doc_checklist: dict) -> dict:
+    """
+    Short-circuit logic: check Block conditions first, then Escalate.
+    Called before the LLM to provide deterministic context.
+    """
+    block_reasons: list[str] = []
+    escalate_reasons: list[str] = []
+
+    vendor_category = (intake.get("vendor_category") or "").lower()
+    acv = float(intake.get("annual_contract_value") or 0)
+    data_access = intake.get("data_access") or []
+    payment_terms = (intake.get("payment_terms") or "")
+    contract_term = int(intake.get("contract_term_months") or 0)
+    ai_func = (intake.get("ai_functionality") or "").lower()
+    is_saas = "saas" in vendor_category or "software" in vendor_category
+
+    # ── BLOCK conditions (checked first; any hit = immediate block) ────────
+    if is_saas and acv > 25_000:
+        if not doc_checklist.get("soc2_type2", {}).get("provided"):
+            block_reasons.append(
+                "SOC 2 Type II not provided — required for SaaS vendors with ACV > $25,000"
+            )
+
+    if data_access:
+        if not doc_checklist.get("data_processing_agreement", {}).get("provided"):
+            block_reasons.append(
+                "Data Processing Agreement not provided despite declared data access"
+            )
+
+    if is_saas and not doc_checklist.get("security_questionnaire", {}).get("provided"):
+        block_reasons.append("Security questionnaire missing for SaaS vendor")
+
+    # ── ESCALATE conditions (only checked if no Block) ─────────────────────
+    if acv > 50_000:
+        escalate_reasons.append(
+            f"ACV ${acv:,.0f} exceeds $50,000 — requires Procurement Manager + VP Finance"
+        )
+
+    m = re.search(r"net\s*(\d+)", payment_terms.lower())
+    net_days = int(m.group(1)) if m else 30
+    if net_days >= 60:
+        escalate_reasons.append(
+            f"Payment terms {payment_terms} require VP Finance review (≥ Net 60)"
+        )
+
+    pii_kw = {"personal", "employee name", "employee email", "salary", "performance",
+               "engagement", "attrition", "customer name", "customer email"}
+    for item in data_access:
+        if any(k in item.lower() for k in pii_kw):
+            escalate_reasons.append(f"PII data processing declared: '{item}'")
+            break
+
+    if any(t in ai_func for t in ("train", "model", "improve", "enhancement", "benchmarking")):
+        escalate_reasons.append(
+            "AI functionality with potential data-training use — requires Legal + Executive review"
+        )
+
+    if contract_term > 12:
+        escalate_reasons.append(
+            f"Contract term {contract_term} months requires Legal review"
+        )
+
+    screen_result = "block" if block_reasons else ("escalate" if escalate_reasons else "proceed")
+    return {
+        "screen_result": screen_result,
+        "block_reasons": block_reasons,
+        "escalate_reasons": escalate_reasons,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tool dispatcher (for tools that take LLM-supplied inputs)
 # ---------------------------------------------------------------------------
 
@@ -398,6 +472,7 @@ TOOL_REGISTRY = {
     "classify_data_sensitivity": classify_data_sensitivity,
     "determine_required_approvals": determine_required_approvals,
     "validate_cross_document_consistency": validate_cross_document_consistency,
+    "pre_screen_case": pre_screen_case,
 }
 
 
