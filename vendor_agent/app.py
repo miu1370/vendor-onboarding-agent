@@ -18,10 +18,15 @@ load_dotenv(Path(__file__).parent / ".env")
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 # Support both local .env and Streamlit Cloud secrets
-_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-if not _API_KEY:
+_KEY_SOURCE = "none"
+_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+if _API_KEY:
+    _KEY_SOURCE = "env"
+else:
     try:
-        _API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
+        _API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "").strip()
+        if _API_KEY:
+            _KEY_SOURCE = "secrets"
     except Exception:
         pass
 
@@ -115,9 +120,11 @@ with st.sidebar:
     run_case_id = CASE_ORDER[labels.index(selected_label)]
 
     if not _API_KEY:
-        st.error("ANTHROPIC_API_KEY not set in .env")
+        st.error("ANTHROPIC_API_KEY not set. Add it to Streamlit Cloud → Settings → Secrets.")
         can_run = False
     else:
+        masked = _API_KEY[:12] + "..." + _API_KEY[-4:]
+        st.caption(f"🔑 Key loaded ({_KEY_SOURCE}): `{masked}`")
         can_run = True
 
     run_btn = st.button(
