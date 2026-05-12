@@ -12,14 +12,18 @@ from agent import run_vendor_agent
 # Config
 # ---------------------------------------------------------------------------
 BASE_PATH = str(Path(__file__).parent.parent)
-DOCS_PATH = Path(BASE_PATH) / "docs"
-CASES_PATH = Path(BASE_PATH) / "cases"
 AUDIT_LOG = Path(__file__).parent / "audit_log.json"
 
 load_dotenv(Path(__file__).parent / ".env")
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+# Support both local .env and Streamlit Cloud secrets
 _API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+if not _API_KEY:
+    try:
+        _API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        pass
 
 st.set_page_config(
     page_title="Vendor Onboarding Agent",
@@ -61,52 +65,15 @@ REC_LABELS = {
     "blocked": "🚫 Blocked",
 }
 
-POLICY_VERSIONS = {
-    "finance_approval_matrix": "v1.2.0",
-    "vendor_risk_policy": "v2.0.1",
-    "security_review_policy": "v1.5.3",
-    "legal_review_policy": "v1.1.2",
-    "data_handling_policy": "v2.3.0",
-    "procurement_policy": "v1.0.4",
-    "communication_policy": "v1.0.1",
-}
-
-FILE_ICONS = {".xlsx": "📊", ".csv": "📋", ".pdf": "📕", ".md": "📝", ".txt": "✉️"}
-
-CASE_MANIFESTS = {
-    "case_001": {
-        "title": "Case 001 · Northstar Analytics",
-        "description": "SaaS AI analytics vendor, high ACV, missing compliance docs, possible duplicate in register.",
-        "expected_risk": "high",
-        "expected_recommendation": "blocked",
-        "expected_blocking_count": 2,
-    },
-    "case_002": {
-        "title": "Case 002 · Workspace Depot",
-        "description": "Office supplies renewal, low ACV, no data access, two admin docs missing.",
-        "expected_risk": "low",
-        "expected_recommendation": "ready_for_approval",
-        "expected_blocking_count": 0,
-    },
-    "case_003": {
-        "title": "Case 003 · TalentPulse AI",
-        "description": "HR AI platform, high ACV, employee PII, EU+APAC subprocessors, AI training clause.",
-        "expected_risk": "high",
-        "expected_recommendation": "blocked",
-        "expected_blocking_count": 3,
-    },
-}
 
 # ---------------------------------------------------------------------------
 # Session state defaults
 # ---------------------------------------------------------------------------
 _DEFAULTS = {
-    "page": "Overview",
     "analyses": {},
     "decisions": {},
     "hitl_state": {},
     "selected_case": None,
-    "test_scores": [],
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -140,18 +107,6 @@ def get_hitl(case_id: str) -> dict:
 with st.sidebar:
     st.markdown("## 🏢 Vendor Onboarding")
     st.caption("AI-assisted procurement triage")
-    st.divider()
-
-    page_choice = st.radio(
-        "Navigation",
-        ["Overview", "Knowledge Base", "Test Cases"],
-        index=["Overview", "Knowledge Base", "Test Cases"].index(st.session_state.page),
-        label_visibility="collapsed",
-    )
-    if page_choice != st.session_state.page:
-        st.session_state.page = page_choice
-        st.rerun()
-
     st.divider()
     st.subheader("Run Analysis")
 
@@ -190,7 +145,6 @@ if run_btn and can_run:
             result = run_vendor_agent(case_data, policies, _API_KEY)
             st.session_state.analyses[run_case_id] = result
             st.session_state.selected_case = run_case_id
-            st.session_state.page = "Overview"
             if run_case_id in st.session_state.hitl_state:
                 del st.session_state.hitl_state[run_case_id]
             st.rerun()
@@ -200,11 +154,10 @@ if run_btn and can_run:
 
 
 # ===========================================================================
-# OVERVIEW PAGE
+# MAIN PAGE
 # ===========================================================================
-if st.session_state.page == "Overview":
 
-    # Build pipeline dataframe
+# Build pipeline dataframe
     rows = []
     for case_id, meta in CASE_META.items():
         result = st.session_state.analyses.get(case_id)
@@ -574,132 +527,3 @@ draft communications  *(Generator-Critic reflection for medium/high risk)*
                     hitl["action"] = "reject"
                     hitl["show_form"] = True
                     st.rerun()
-
-
-# ===========================================================================
-# KNOWLEDGE BASE PAGE
-# ===========================================================================
-elif st.session_state.page == "Knowledge Base":
-
-    st.markdown("## Knowledge Base")
-    st.caption("Internal procurement policies referenced by the agent during triage.")
-    st.divider()
-
-    policy_files = sorted(DOCS_PATH.glob("*.md"))
-
-    if not policy_files:
-        st.error(f"No policy documents found at {DOCS_PATH}")
-    else:
-        for pf in policy_files:
-            name = pf.stem
-            title = name.replace("_", " ").title()
-            version = POLICY_VERSIONS.get(name, "v1.0.0")
-            content = pf.read_text()
-
-            with st.expander(f"📄 {title}  ·  `{version}`", expanded=False):
-                st.markdown(content)
-
-
-# ===========================================================================
-# TEST CASES PAGE
-# ===========================================================================
-elif st.session_state.page == "Test Cases":
-
-    st.markdown("## Test Cases & Evaluation")
-    st.caption("Vendor onboarding packages included in this package, with expected agent outcomes.")
-    st.divider()
-
-    for case_id, manifest in CASE_MANIFESTS.items():
-        result = st.session_state.analyses.get(case_id)
-        status_badge = ""
-        if result:
-            triage = result.get("triage_output") or {}
-            risk_raw = triage.get("risk_tier", "?").upper()
-            status_badge = f"  ·  {RISK_COLOR.get(risk_raw, '⚪')} {risk_raw}"
-
-        with st.expander(f"**{manifest['title']}**{status_badge}", expanded=True):
-            st.caption(manifest["description"])
-            tc1, tc2 = st.columns([1, 2])
-
-            with tc1:
-                st.markdown("**Expected outcomes**")
-                st.markdown(f"- Risk tier: `{manifest['expected_risk']}`")
-                st.markdown(f"- Recommendation: `{manifest['expected_recommendation']}`")
-                st.markdown(f"- Min blocking issues: `{manifest['expected_blocking_count']}`")
-
-                if result:
-                    triage = result.get("triage_output") or {}
-                    actual_risk = triage.get("risk_tier", "?")
-                    actual_rec = triage.get("recommendation", "?")
-                    actual_blocking = len(triage.get("blocking_issues") or [])
-                    st.markdown("**Actual results**")
-                    st.markdown(
-                        f"- Risk: {'✅' if actual_risk == manifest['expected_risk'] else '❌'} `{actual_risk}`"
-                    )
-                    st.markdown(
-                        f"- Rec: {'✅' if actual_rec == manifest['expected_recommendation'] else '❌'} `{actual_rec}`"
-                    )
-                    st.markdown(
-                        f"- Blocking: {'✅' if actual_blocking >= manifest['expected_blocking_count'] else '❌'} `{actual_blocking}`"
-                    )
-
-            with tc2:
-                st.markdown("**File manifest**")
-                case_dir = CASES_PATH / case_id
-                if case_dir.exists():
-                    for fpath in sorted(case_dir.iterdir()):
-                        icon = FILE_ICONS.get(fpath.suffix, "📄")
-                        size_kb = fpath.stat().st_size / 1024
-                        st.markdown(f"{icon} `{fpath.name}` &nbsp; {size_kb:.1f} KB")
-                else:
-                    st.warning(f"Case directory not found: {case_dir}")
-
-    st.divider()
-    st.subheader("Batch Evaluation")
-
-    analyzed = [cid for cid in CASE_ORDER if cid in st.session_state.analyses]
-    unanalyzed = [cid for cid in CASE_ORDER if cid not in st.session_state.analyses]
-
-    if unanalyzed:
-        st.warning(
-            f"{len(unanalyzed)} case(s) not yet analyzed: "
-            + ", ".join(CASE_META[c]["vendor"] for c in unanalyzed)
-        )
-
-    if st.button(
-        "▶ Run Evaluation on All Analyzed Cases",
-        type="primary",
-        disabled=len(analyzed) == 0,
-    ):
-        scores = []
-        for case_id in analyzed:
-            manifest = CASE_MANIFESTS[case_id]
-            triage = (st.session_state.analyses[case_id].get("triage_output") or {})
-            actual_risk = triage.get("risk_tier", "?")
-            actual_rec = triage.get("recommendation", "?")
-            actual_blocking = len(triage.get("blocking_issues") or [])
-
-            risk_ok = actual_risk == manifest["expected_risk"]
-            rec_ok = actual_rec == manifest["expected_recommendation"]
-            block_ok = actual_blocking >= manifest["expected_blocking_count"]
-            score = sum([risk_ok, rec_ok, block_ok])
-
-            scores.append({
-                "Case": manifest["title"].split(" · ")[0],
-                "Vendor": manifest["title"].split(" · ", 1)[-1],
-                "Risk ✓": "✅" if risk_ok else f"❌  got `{actual_risk}`",
-                "Rec ✓": "✅" if rec_ok else f"❌  got `{actual_rec}`",
-                "Blocking ✓": "✅" if block_ok else f"❌  got {actual_blocking}",
-                "Score": f"{score}/3",
-            })
-        st.session_state.test_scores = scores
-
-    if st.session_state.test_scores:
-        scores = st.session_state.test_scores
-        passed = sum(1 for s in scores if s["Score"] == "3/3")
-        st.metric("Cases passing all checks", f"{passed}/{len(scores)}")
-        st.dataframe(
-            pd.DataFrame(scores),
-            use_container_width=True,
-            hide_index=True,
-        )
