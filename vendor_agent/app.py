@@ -197,12 +197,17 @@ with st.sidebar:
     run_case_id = CASE_ORDER[labels.index(selected_label)]
 
     if not _API_KEY:
-        st.error("ANTHROPIC_API_KEY not set. Add it to Streamlit Cloud → Settings → Secrets.")
+        st.error("ANTHROPIC_API_KEY not set.\n\nStreamlit Cloud → Settings → Secrets → add:\n`ANTHROPIC_API_KEY = \"sk-ant-...\"`")
         can_run = False
     else:
-        masked = _API_KEY[:12] + "..." + _API_KEY[-4:]
-        st.caption(f"🔑 Key loaded ({_KEY_SOURCE}): `{masked}`")
-        can_run = True
+        masked = _API_KEY[:14] + "..." + _API_KEY[-4:]
+        st.caption(f"🔑 `{masked}` (from {_KEY_SOURCE})")
+        # Quick key format sanity check
+        if not _API_KEY.startswith("sk-ant-"):
+            st.error("⚠️ Key doesn't look like an Anthropic key (should start with `sk-ant-`). Check Streamlit Cloud → Settings → Secrets.")
+            can_run = False
+        else:
+            can_run = True
 
     run_btn = st.button(
         "▶ Run Agent Analysis",
