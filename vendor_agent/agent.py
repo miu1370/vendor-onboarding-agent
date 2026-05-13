@@ -4,6 +4,8 @@ import anthropic
 from tools import execute_tool, extract_contract_clauses, pre_screen_case
 
 MODEL = "claude-sonnet-4-6"
+MODEL_CRITIC = "claude-haiku-4-5-20251001"
+_CACHE_BETA = ["prompt-caching-2024-07-31"]
 
 TOOLS = [
     {
@@ -385,7 +387,7 @@ Return ONLY a valid JSON object — no markdown, no code blocks:
 }}"""
 
     response = client.messages.create(
-        model=MODEL,
+        model=MODEL_CRITIC,
         max_tokens=1024,
         temperature=0,
         messages=[{"role": "user", "content": prompt}],
@@ -425,7 +427,8 @@ def run_vendor_agent(case_data: dict, policies: dict, api_key: str) -> dict:
     # Step 2: Generator — full LLM analysis with tool-calling loop
     client = anthropic.Anthropic(api_key=api_key)
     messages = [{"role": "user", "content": _build_case_prompt(case_data, pre_screen)}]
-    system = _build_system_prompt(policies)
+    # Cache system prompt so policy documents are not reprocessed on every tool-call turn
+    system_blocks = [{"type": "text", "text": _build_system_prompt(policies), "cache_control": {"type": "ephemeral"}}]
 
     triage_output = None
     tool_calls_log = []
@@ -433,10 +436,11 @@ def run_vendor_agent(case_data: dict, policies: dict, api_key: str) -> dict:
     for _ in range(25):
         response = client.messages.create(
             model=MODEL,
-            max_tokens=8096,
-            system=system,
+            max_tokens=4096,
+            system=system_blocks,
             tools=TOOLS,
             messages=messages,
+            betas=_CACHE_BETA,
         )
 
         messages.append({"role": "assistant", "content": response.content})
