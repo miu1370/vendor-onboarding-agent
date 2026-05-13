@@ -81,6 +81,52 @@ TOOLS = [
         },
     },
     {
+        "name": "run_policy_checklist",
+        "description": (
+            "Run the complete 27-item policy checklist deterministically across Finance (FIN-001–009), "
+            "Legal (LEG-001–010), Security (SEC-001–007), Procurement (PRO-001–005), "
+            "Data Handling (DAT-001–003). Returns every check — cleared and triggered. "
+            "Call after extract_contract_clauses and validate_cross_document_consistency. "
+            "Pass the returned `checklist` array verbatim as policy_checklist in submit_triage_output."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "acv": {"type": "number", "description": "Annual contract value from intake"},
+                "tcv": {"type": "number", "description": "Total contract value from calculate_total_contract_value"},
+                "payment_terms": {"type": "string"},
+                "contract_term_months": {"type": "integer"},
+                "data_sensitivity": {"type": "string", "enum": ["public", "internal", "confidential", "restricted"]},
+                "budget_remaining": {"type": "number", "description": "Preferred: annual_budget_remaining from lookup_budget"},
+                "budget_sufficient": {"type": "boolean", "description": "Fallback if budget_remaining is unavailable: true = budget covers ACV"},
+                "vendor_found_in_register": {"type": "boolean"},
+                "renewal_status": {"type": "string", "enum": ["new_vendor", "renewal"]},
+                "soc2_type2_provided": {"type": "boolean"},
+                "dpa_provided": {"type": "boolean"},
+                "security_questionnaire_provided": {"type": "boolean"},
+                "vendor_category": {"type": "string"},
+                "has_eu_subprocessors": {"type": "boolean"},
+                "has_apac_subprocessors": {"type": "boolean"},
+                "has_ai_training": {"type": "boolean"},
+                "ai_training_opt_out_confirmed": {"type": "boolean"},
+                "acv_matches_quote": {"type": "boolean", "description": "True if intake ACV == quote annual total"},
+                "subprocessors_consistent": {"type": "boolean", "description": "True if intake and questionnaire subprocessors match"},
+                "liability_cap_months": {"type": "integer", "description": "Months in liability cap; omit if not detected"},
+                "auto_renewal_found": {"type": "boolean"},
+                "governing_law_outside_us": {"type": "boolean"},
+                "dpa_ref_in_contract": {"type": "boolean"},
+                "system_integrations": {"type": "array", "items": {"type": "string"}},
+                "required_intake_fields_complete": {"type": "boolean"},
+                "all_required_docs_provided": {"type": "boolean"},
+            },
+            "required": [
+                "acv", "tcv", "payment_terms", "contract_term_months", "data_sensitivity",
+                "vendor_found_in_register", "renewal_status",
+                "soc2_type2_provided", "dpa_provided", "security_questionnaire_provided", "vendor_category",
+            ],
+        },
+    },
+    {
         "name": "determine_required_approvals",
         "description": "Determine required approvals and reviews based on vendor details and internal policies.",
         "input_schema": {
@@ -135,11 +181,68 @@ TOOLS = [
                     "type": "string",
                     "enum": ["ready_for_approval", "pending_information", "escalate_to_human", "blocked"],
                 },
+                "case_facts": {
+                    "type": "object",
+                    "description": "Structured facts extracted from all documents. Fill from tool outputs before submitting.",
+                    "properties": {
+                        "vendor_name": {"type": "string"},
+                        "vendor_category": {"type": "string"},
+                        "renewal_status": {"type": "string"},
+                        "cost_center": {"type": "string"},
+                        "acv": {"type": "number"},
+                        "tcv": {"type": "number"},
+                        "contract_term_months": {"type": "integer"},
+                        "payment_terms": {"type": "string"},
+                        "net_payment_days": {"type": "integer"},
+                        "budget_remaining": {"type": "number"},
+                        "budget_sufficient": {"type": "boolean"},
+                        "data_sensitivity": {"type": "string"},
+                        "data_types": {"type": "array", "items": {"type": "string"}},
+                        "system_integrations": {"type": "array", "items": {"type": "string"}},
+                        "subprocessors": {"type": "array", "items": {"type": "string"}},
+                        "has_eu_subprocessors": {"type": "boolean"},
+                        "has_apac_subprocessors": {"type": "boolean"},
+                        "ai_functionality": {"type": "string"},
+                        "has_ai_training_language": {"type": "boolean"},
+                        "ai_training_opt_out_confirmed": {"type": "boolean"},
+                        "soc2_type2_provided": {"type": "boolean"},
+                        "dpa_provided": {"type": "boolean"},
+                        "security_questionnaire_provided": {"type": "boolean"},
+                        "auto_renewal_clause": {"type": "boolean"},
+                        "governing_law": {"type": "string"},
+                        "governing_law_outside_us": {"type": "boolean"},
+                        "liability_cap_months": {"type": "integer"},
+                        "dpa_referenced_in_contract": {"type": "boolean"},
+                        "vendor_in_register": {"type": "boolean"},
+                        "acv_matches_quote": {"type": "boolean"},
+                        "subprocessors_consistent": {"type": "boolean"},
+                        "all_docs_provided": {"type": "boolean"},
+                        "missing_documents": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                "policy_checklist": {
+                    "type": "array",
+                    "description": "Full 27-item checklist from run_policy_checklist — pass the `checklist` array verbatim.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "check_id": {"type": "string"},
+                            "domain": {"type": "string"},
+                            "description": {"type": "string"},
+                            "policy_ref": {"type": "string"},
+                            "extracted_value": {"type": "string"},
+                            "result": {"type": "string", "enum": ["clear", "triggered"]},
+                            "flag_severity": {"type": "string"},
+                            "flag_reason": {"type": "string"},
+                            "action_required": {"type": "string"},
+                        },
+                    },
+                },
             },
             "required": [
                 "summary", "risk_tier", "missing_documents", "blocking_issues",
                 "policy_flags", "required_approvals", "required_reviews",
-                "draft_internal_ticket", "recommendation",
+                "draft_internal_ticket", "recommendation", "policy_checklist",
             ],
         },
     },
@@ -164,8 +267,9 @@ Call tools in this order:
 4. classify_data_sensitivity
 5. extract_contract_clauses (no parameters)
 6. validate_cross_document_consistency
-7. determine_required_approvals
-8. submit_triage_output
+7. run_policy_checklist — pass all extracted values; set acv_matches_quote=false if issues[type=acv_mismatch] found; set subprocessors_consistent=false if subprocessor issues found; pass the returned `checklist` array verbatim as policy_checklist in submit_triage_output
+8. determine_required_approvals
+9. submit_triage_output
 
 Rules:
 - Never approve vendors, commit spend, accept contract terms, or send external communications.

@@ -1,8 +1,12 @@
 # Vendor Onboarding Agent
 
-An AI agent prototype that reviews mock vendor onboarding packages and produces structured procurement recommendations for a human owner.
+A human-in-the-loop AI platform that automates vendor procurement review. The agent parses intake documents, runs 34 policy checks across 5 compliance domains, scores risk, and surfaces structured findings for human reviewers — who accept, modify, or override each check before submitting a final onboarding decision.
 
-## Setup
+See [ARCHITECTURE.md](../ARCHITECTURE.md) for the design rationale and productionization path.
+
+---
+
+## Quick Start
 
 ```bash
 cd vendor_agent
@@ -11,64 +15,66 @@ export ANTHROPIC_API_KEY=sk-ant-...
 streamlit run app.py
 ```
 
-The app opens at `http://localhost:8501`. Select a case, click **▶ Run Agent Analysis**, and review the output across the six tabs.
+The app opens at `http://localhost:8501`. Three pre-analyzed cases are loaded. To add a new vendor, click **➕ New Vendor** on the pipeline page and upload documents.
 
-## Project structure
+> **Offline mode** — if no API key is set, the app loads from `analysis_results.json` (precomputed). All review and export features still work.
+
+---
+
+## Project Structure
 
 ```
 Candidate_package/
-├── cases/           # 3 synthetic vendor onboarding cases (xlsx, csv, pdf, md, txt)
-├── docs/            # 7 internal policy documents
-├── tools/           # Mock deterministic data (budget_lookup.csv, vendor_register.csv)
+├── cases/
+│   ├── case_001/    # Northstar Analytics — SaaS/AI, $85K ACV, HIGH risk
+│   ├── case_002/    # Workspace Depot — Office Supplies, $12K ACV, LOW risk
+│   └── case_003/    # TalentPulse AI — HR/AI, $120K ACV, HIGH risk
+│       Each case: {id}_intake.xlsx, _quote.csv, _contract.pdf,
+│                  _security_questionnaire.md, _vendor_email.txt
+│
+├── docs/            # 7 internal policy documents (read by agent at runtime)
+│
+├── tools/
+│   ├── budget_lookup.csv       # Mock cost-center budget data
+│   └── vendor_register.csv     # Mock existing vendor registry
+│
+├── ARCHITECTURE.md  # Design decisions + productionization path
+│
 └── vendor_agent/
-    ├── app.py       # Streamlit UI + human approval gate
-    ├── agent.py     # Claude API agent with tool-calling loop
-    ├── parsers.py   # Document parsers (xlsx, csv, pdf, md, txt)
-    ├── tools.py     # 5 deterministic tool functions + dispatcher
+    ├── app.py                  # Streamlit UI
+    ├── agent.py                # Claude tool-calling loop + Generator-Critic
+    ├── parsers.py              # Document parsers (xlsx, csv, pdf, md, txt)
+    ├── tools.py                # 9 tool functions + dispatcher
+    ├── mock_data.py            # Seed data for budget/vendor register
+    ├── precompute_results.py   # CLI to pre-run agent without API key
+    ├── analysis_results.json   # Persisted analysis versions + reviewer decisions
+    ├── audit_log.json          # Immutable record of all submitted decisions
+    ├── new_vendors.json        # Newly uploaded vendors pending analysis
+    ├── uploads/                # Uploaded vendor documents
     └── requirements.txt
 ```
 
-## Architecture note
+---
 
-The agent follows the process flow provided in `tools/Agent process flow.png`:
+## Policy Checklist — 34 Rules Across 5 Domains
 
-```
-Input documents
-    │
-    ▼
-parsers.py          ← parse xlsx / csv / pdf / md / txt
-    │
-    ▼
-Claude (claude-sonnet-4-6) with tool_use
-    ├── lookup_budget()                 → check cost-center budget vs ACV
-    ├── check_existing_vendor()         → detect duplicate vendor entries
-    ├── calculate_total_contract_value()→ ACV × term / 12 + one-time fees
-    ├── classify_data_sensitivity()     → restricted / confidential / internal
-    ├── determine_required_approvals()  → finance matrix + legal + security triggers
-    └── submit_triage_output()          → structured JSON recommendation
-    │
-    ▼
-Streamlit UI
-    ├── Summary & policy flags
-    ├── Approval routing
-    ├── Missing documents
-    ├── DRAFT communications (vendor follow-up + internal ticket)
-    ├── Tool call log (transparent reasoning)
-    └── Human Approval Gate  ← decision recorded here; nothing proceeds without it
+| Domain | IDs | Key checks |
+|--------|-----|------------|
+| **Finance** | FIN-001 → FIN-009 | ACV/TCV approval thresholds, payment terms, budget sufficiency, contract duration |
+| **Legal** | LEG-001 → LEG-007 | Governing law, liability cap, auto-renewal, DPA, AI training opt-out |
+| **Security** | SEC-001 → SEC-006 | SOC 2 Type II, security questionnaire, data residency, EU subprocessors |
+| **Data Handling** | DAT-001 → DAT-003 | Restricted data, PII handling, cross-border transfer |
+| **Procurement** | PRO-001 → PRO-009 | Vendor register, duplicate check, required docs, approval routing |
+
+Each rule produces: `result` (triggered / pass), `flag_severity` (blocking / warning / info), `flag_reason`, and `action_required`.
+
+---
+
+## Precomputing Results (no API key required)
+
+```bash
+cd vendor_agent
+python precompute_results.py
 ```
 
-All external communications are drafted only — they require explicit human approval before sending. The agent cannot approve vendors, commit spend, or modify contract terms.
-
-## How to productionize
-
-| Area | Current prototype | Production approach |
-|------|-------------------|---------------------|
-| **Auth** | API key in env var | OAuth / SSO; per-user API key vault |
-| **Data ingestion** | Local file paths | S3 / GCS intake bucket; webhook trigger |
-| **State** | Streamlit session state | Database (Postgres) + task queue (Celery/SQS) |
-| **Audit log** | In-memory tool call log | Append-only audit table; every agent action recorded |
-| **Human gate** | Streamlit radio buttons | Approval workflow (Slack bot, email action links, or procurement system integration) |
-| **Policy updates** | Edit markdown files | Versioned policy store; agent re-evaluated on policy change |
-| **LLM** | claude-sonnet-4-6 | Prompt-cache policy docs (5-min TTL); route high-risk cases to claude-opus-4-7 |
-| **Observability** | None | LLM tracing (LangSmith / Helicone); latency + token dashboards |
-| **Testing** | Manual case review | Golden-set eval harness: run all 3 cases on every deploy, assert expected risk tiers and approval lists |
+Runs the agent on all three cases and writes results to `analysis_results.json`. The Streamlit app will load from this file automatically when no API key is present.

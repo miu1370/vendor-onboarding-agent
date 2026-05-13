@@ -462,6 +462,274 @@ def pre_screen_case(intake: dict, doc_checklist: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Policy checklist runner (deterministic, 27 items)
+# ---------------------------------------------------------------------------
+
+def run_policy_checklist(
+    acv: float,
+    tcv: float,
+    payment_terms: str,
+    contract_term_months: int,
+    data_sensitivity: str,
+    vendor_found_in_register: bool,
+    renewal_status: str,
+    soc2_type2_provided: bool,
+    dpa_provided: bool,
+    security_questionnaire_provided: bool,
+    vendor_category: str,
+    # budget: pass either budget_remaining (preferred) or budget_sufficient (boolean fallback)
+    budget_remaining: float = None,
+    budget_sufficient: bool = None,
+    has_eu_subprocessors: bool = False,
+    has_apac_subprocessors: bool = False,
+    has_ai_training: bool = False,
+    ai_training_opt_out_confirmed: bool = False,
+    acv_matches_quote: bool = True,
+    subprocessors_consistent: bool = True,
+    liability_cap_months: int = None,
+    auto_renewal_found: bool = False,
+    governing_law_outside_us: bool = False,
+    dpa_ref_in_contract: bool = False,
+    system_integrations: list = None,
+    required_intake_fields_complete: bool = True,
+    all_required_docs_provided: bool = False,
+) -> dict:
+    is_saas = "saas" in vendor_category.lower() or "software" in vendor_category.lower()
+    net_match = re.search(r"net\s*(\d+)", payment_terms.lower())
+    net_days = int(net_match.group(1)) if net_match else 30
+    # Resolve budget check: prefer exact remaining amount, fall back to boolean flag
+    if budget_remaining is not None:
+        budget_exceeded = budget_remaining < acv
+        budget_display = f"Remaining ${budget_remaining:,.0f} vs ACV ${acv:,.0f}"
+        budget_reason = f"Budget remaining (${budget_remaining:,.0f}) < ACV (${acv:,.0f})"
+    elif budget_sufficient is not None:
+        budget_exceeded = not budget_sufficient
+        budget_display = f"Sufficient: {budget_sufficient}"
+        budget_reason = "Budget marked insufficient by finance system"
+    else:
+        budget_exceeded = False
+        budget_display = "Unknown"
+        budget_reason = ""
+    sensitive = data_sensitivity in ("confidential", "restricted")
+    integrations = system_integrations or []
+    HIGH_RISK_INT = {"crm", "hris", "hr", "finance", "production", "erp", "payroll"}
+    has_high_risk_int = any(any(r in i.lower() for r in HIGH_RISK_INT) for i in integrations)
+
+    def item(check_id, domain, description, policy_ref, extracted_value, triggered,
+             severity=None, reason="", action=""):
+        return {
+            "check_id": check_id,
+            "domain": domain,
+            "description": description,
+            "policy_ref": policy_ref,
+            "extracted_value": str(extracted_value),
+            "result": "triggered" if triggered else "clear",
+            "flag_severity": (severity if triggered and severity else ""),
+            "flag_reason": (reason if triggered else ""),
+            "action_required": (action if triggered else ""),
+        }
+
+    checks = [
+        # Finance
+        item("FIN-001", "Finance", "ACV vs $25K threshold", "finance_approval_matrix.md",
+             f"${acv:,.0f}", acv > 25_000, "warning",
+             "ACV exceeds $25K — Procurement Manager required",
+             "Add Procurement Manager to approval chain"),
+        item("FIN-002", "Finance", "ACV vs $50K threshold", "finance_approval_matrix.md",
+             f"${acv:,.0f}", acv > 50_000, "warning",
+             "ACV exceeds $50K — VP Finance required",
+             "Add VP Finance to approval chain"),
+        item("FIN-003", "Finance", "ACV vs $100K threshold", "finance_approval_matrix.md",
+             f"${acv:,.0f}", acv > 100_000, "warning",
+             "ACV exceeds $100K — CFO required",
+             "Add CFO to approval chain"),
+        item("FIN-004", "Finance", "ACV vs $250K threshold", "finance_approval_matrix.md",
+             f"${acv:,.0f}", acv > 250_000, "warning",
+             "ACV exceeds $250K — Executive Sponsor required",
+             "Add Executive Sponsor to approval chain"),
+        item("FIN-005", "Finance", "TCV vs $100K threshold", "finance_approval_matrix.md",
+             f"${tcv:,.0f}", tcv > 100_000, "warning",
+             "TCV exceeds $100K — Legal review required",
+             "Route to Legal for contract review"),
+        item("FIN-006", "Finance", "TCV vs $250K threshold", "finance_approval_matrix.md",
+             f"${tcv:,.0f}", tcv > 250_000, "warning",
+             "TCV exceeds $250K — Executive Sponsor required",
+             "Add Executive Sponsor to approval chain"),
+        item("FIN-007", "Finance", "Payment terms (Net 30/45/60/90+)", "finance_approval_matrix.md",
+             payment_terms, net_days >= 60,
+             "blocking" if net_days > 60 else "warning",
+             f"Payment terms {payment_terms} require VP Finance"
+             + (" + Legal" if net_days > 60 else "") + " review",
+             "Add VP Finance" + (" and Legal" if net_days > 60 else "") + " to approval chain"),
+        item("FIN-008", "Finance", "Contract term vs 24-month threshold", "finance_approval_matrix.md",
+             f"{contract_term_months} months", contract_term_months > 24, "warning",
+             f"Contract term {contract_term_months}m exceeds 24-month threshold",
+             "Route to Finance for multi-year contract review"),
+        item("FIN-009", "Finance", "Budget remaining vs ACV", "finance_approval_matrix.md",
+             budget_display,
+             budget_exceeded, "blocking",
+             budget_reason,
+             "Escalate to Finance/FP&A for budget reallocation before proceeding"),
+
+        # Legal
+        item("LEG-001", "Legal", "ACV > $50K → Legal review", "legal_review_policy.md",
+             f"${acv:,.0f}", acv > 50_000, "warning",
+             "ACV exceeds $50K — Legal review required",
+             "Route to Legal"),
+        item("LEG-002", "Legal", "Contract term > 12 months → Legal review", "legal_review_policy.md",
+             f"{contract_term_months} months", contract_term_months > 12, "warning",
+             f"Contract term {contract_term_months}m exceeds 12-month threshold",
+             "Route to Legal for review"),
+        item("LEG-003", "Legal", "Personal data processing → DPA required", "data_handling_policy.md",
+             f"Sensitivity: {data_sensitivity}, DPA provided: {dpa_provided}",
+             sensitive and not dpa_provided, "blocking",
+             "Personal/confidential data processing declared but DPA not provided",
+             "Request DPA from vendor before proceeding"),
+        item("LEG-004", "Legal", "AI/ML on company data → Legal + Executive approval",
+             "legal_review_policy.md",
+             "Yes" if has_ai_training else "No",
+             has_ai_training, "blocking",
+             "Vendor uses company data for AI/ML — Legal and Executive approval required",
+             "Escalate to Legal and Executive Sponsor; confirm opt-out or prohibit training use"),
+        item("LEG-005", "Legal", "EU subprocessors present", "legal_review_policy.md",
+             "Yes" if has_eu_subprocessors else "No",
+             has_eu_subprocessors, "warning",
+             "EU subprocessors detected — Legal GDPR/SCCs review required",
+             "Route to Legal for EU data transfer review"),
+        item("LEG-006", "Legal", "APAC subprocessors present", "legal_review_policy.md",
+             "Yes" if has_apac_subprocessors else "No",
+             has_apac_subprocessors, "warning",
+             "APAC subprocessors detected — Legal cross-border transfer review required",
+             "Route to Legal for APAC data transfer review"),
+        item("LEG-007", "Legal", "Liability cap < 12 months", "legal_review_policy.md",
+             f"{liability_cap_months} months" if liability_cap_months is not None else "Not detected",
+             liability_cap_months is not None and liability_cap_months < 12, "warning",
+             f"Liability cap is {liability_cap_months} months — below standard 12-month minimum",
+             "Request Legal review and negotiate higher liability cap"),
+        item("LEG-008", "Legal", "Auto-renewal clause found", "legal_review_policy.md",
+             "Found" if auto_renewal_found else "Not found",
+             auto_renewal_found, "info",
+             "Auto-renewal clause detected — ensure renewal notice period is tracked",
+             "Log renewal date; set calendar reminder 60 days before renewal window"),
+        item("LEG-009", "Legal", "Governing law outside US", "legal_review_policy.md",
+             "Yes" if governing_law_outside_us else "No",
+             governing_law_outside_us, "warning",
+             "Governing law is outside the United States — Legal review required",
+             "Route to Legal to assess jurisdiction risk"),
+        item("LEG-010", "Legal", "DPA reference found in contract", "data_handling_policy.md",
+             "Found" if dpa_ref_in_contract else "Not found",
+             sensitive and not dpa_ref_in_contract, "warning",
+             "Personal data processing declared but DPA not referenced in contract text",
+             "Ensure DPA is incorporated by reference or attached as exhibit"),
+
+        # Security
+        item("SEC-001", "Security", "SOC 2 Type II provided", "security_review_policy.md",
+             "Provided" if soc2_type2_provided else "Missing",
+             is_saas and not soc2_type2_provided, "blocking",
+             "SOC 2 Type II required for SaaS vendor but not provided",
+             "Request SOC 2 Type II report from vendor before proceeding"),
+        item("SEC-002", "Security", "Data sensitivity level", "security_review_policy.md",
+             data_sensitivity, sensitive,
+             "blocking" if data_sensitivity == "restricted" else "warning",
+             f"Data sensitivity is {data_sensitivity} — Security review required",
+             "Route to Security for data access review"),
+        item("SEC-003", "Security", "High-risk system integrations (CRM/HRIS/Finance/Production)",
+             "security_review_policy.md",
+             ", ".join(integrations) if integrations else "None",
+             has_high_risk_int, "warning",
+             "Integration with high-risk system detected",
+             "Security must review integration scope and data flows"),
+        item("SEC-004", "Security", "AI training opt-out confirmed", "data_handling_policy.md",
+             "Confirmed" if ai_training_opt_out_confirmed else "Not confirmed",
+             has_ai_training and not ai_training_opt_out_confirmed,
+             "blocking" if data_sensitivity == "restricted" else "warning",
+             "AI training language present but opt-out not confirmed",
+             "Confirm opt-out clause with vendor or prohibit training use"),
+        item("SEC-005", "Security", "Security questionnaire completeness", "security_review_policy.md",
+             "Provided" if security_questionnaire_provided else "Missing",
+             not security_questionnaire_provided, "blocking",
+             "Security questionnaire not provided",
+             "Request completed security questionnaire from vendor"),
+        item("SEC-006", "Security", "EU subprocessors reviewed by Security", "security_review_policy.md",
+             "Yes" if has_eu_subprocessors else "N/A",
+             has_eu_subprocessors, "warning",
+             "EU subprocessors present — Security must review data transfer controls",
+             "Security team to review EU subprocessor list and transfer mechanisms"),
+        item("SEC-007", "Security", "APAC subprocessors reviewed by Security", "security_review_policy.md",
+             "Yes" if has_apac_subprocessors else "N/A",
+             has_apac_subprocessors, "warning",
+             "APAC subprocessors present — Security must review data transfer controls",
+             "Security team to review APAC subprocessor list and transfer mechanisms"),
+
+        # Procurement
+        item("PRO-001", "Procurement", "All required intake fields present", "procurement_policy.md",
+             "Complete" if required_intake_fields_complete else "Incomplete",
+             not required_intake_fields_complete, "warning",
+             "Required intake fields are missing — cannot complete triage",
+             "Request business owner to complete all intake form fields"),
+        item("PRO-002", "Procurement", "New vendor vs vendor register (duplicate check)",
+             "vendor_risk_policy.md",
+             f"Status: {renewal_status}, In register: {vendor_found_in_register}",
+             (renewal_status == "new_vendor" and vendor_found_in_register) or
+             (renewal_status == "renewal" and not vendor_found_in_register),
+             "blocking" if renewal_status == "new_vendor" and vendor_found_in_register else "warning",
+             ("Intake marked 'new_vendor' but vendor already exists in register — possible duplicate"
+              if renewal_status == "new_vendor" and vendor_found_in_register
+              else "Intake marked 'renewal' but no matching vendor found in register"),
+             "Confirm vendor status with business owner before proceeding"),
+        item("PRO-003", "Procurement", "ACV consistency (intake vs quote)", "procurement_policy.md",
+             "Consistent" if acv_matches_quote else "Mismatch",
+             not acv_matches_quote, "warning",
+             "ACV in intake does not match quote annual total",
+             "Reconcile ACV discrepancy with business owner before routing"),
+        item("PRO-004", "Procurement", "Subprocessor consistency (intake vs questionnaire)",
+             "procurement_policy.md",
+             "Consistent" if subprocessors_consistent else "Mismatch",
+             not subprocessors_consistent, "warning",
+             "Subprocessor lists differ between intake and security questionnaire",
+             "Business owner to confirm complete and accurate subprocessor list"),
+        item("PRO-005", "Procurement", "Document checklist completeness", "procurement_policy.md",
+             "Complete" if all_required_docs_provided else "Incomplete",
+             not all_required_docs_provided, "warning",
+             "Not all required documents have been provided",
+             "Request missing documents from vendor or business owner"),
+
+        # Data Handling
+        item("DAT-001", "Data Handling", "AI training language detected", "data_handling_policy.md",
+             "Detected" if has_ai_training else "Not detected",
+             has_ai_training, "warning",
+             "AI/model-training language found in contract or questionnaire",
+             "Legal and Security to review data-use scope; confirm opt-out"),
+        item("DAT-002", "Data Handling", "Data used for model training without opt-out",
+             "data_handling_policy.md",
+             f"AI training: {has_ai_training}, Opt-out confirmed: {ai_training_opt_out_confirmed}",
+             has_ai_training and not ai_training_opt_out_confirmed,
+             "blocking" if data_sensitivity == "restricted" else "warning",
+             "Vendor may use company data for model training and opt-out is not confirmed",
+             "Block until vendor confirms opt-out or amends contract to exclude training use"),
+        item("DAT-003", "Data Handling", "Subprocessors outside US handling restricted data",
+             "data_handling_policy.md",
+             f"EU: {has_eu_subprocessors}, APAC: {has_apac_subprocessors}, Sensitivity: {data_sensitivity}",
+             (has_eu_subprocessors or has_apac_subprocessors) and data_sensitivity == "restricted",
+             "blocking",
+             "Subprocessors outside the US are handling restricted data",
+             "Legal and Security must review cross-border data transfer controls before proceeding"),
+    ]
+
+    triggered = sum(1 for c in checks if c["result"] == "triggered")
+    blocking = sum(1 for c in checks if c["flag_severity"] == "blocking")
+    warnings = sum(1 for c in checks if c["flag_severity"] == "warning")
+
+    return {
+        "total_checks": len(checks),
+        "triggered": triggered,
+        "blocking": blocking,
+        "warnings": warnings,
+        "checklist": checks,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tool dispatcher (for tools that take LLM-supplied inputs)
 # ---------------------------------------------------------------------------
 
@@ -472,6 +740,7 @@ TOOL_REGISTRY = {
     "classify_data_sensitivity": classify_data_sensitivity,
     "determine_required_approvals": determine_required_approvals,
     "validate_cross_document_consistency": validate_cross_document_consistency,
+    "run_policy_checklist": run_policy_checklist,
     "pre_screen_case": pre_screen_case,
 }
 
