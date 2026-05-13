@@ -5,7 +5,6 @@ from tools import execute_tool, extract_contract_clauses, pre_screen_case
 
 MODEL = "claude-sonnet-4-6"
 MODEL_CRITIC = "claude-haiku-4-5-20251001"
-_CACHE_BETA = ["prompt-caching-2024-07-31"]
 
 TOOLS = [
     {
@@ -427,8 +426,7 @@ def run_vendor_agent(case_data: dict, policies: dict, api_key: str) -> dict:
     # Step 2: Generator — full LLM analysis with tool-calling loop
     client = anthropic.Anthropic(api_key=api_key)
     messages = [{"role": "user", "content": _build_case_prompt(case_data, pre_screen)}]
-    # Cache system prompt so policy documents are not reprocessed on every tool-call turn
-    system_blocks = [{"type": "text", "text": _build_system_prompt(policies), "cache_control": {"type": "ephemeral"}}]
+    system = _build_system_prompt(policies)
 
     triage_output = None
     tool_calls_log = []
@@ -437,10 +435,9 @@ def run_vendor_agent(case_data: dict, policies: dict, api_key: str) -> dict:
         response = client.messages.create(
             model=MODEL,
             max_tokens=4096,
-            system=system_blocks,
+            system=system,
             tools=TOOLS,
             messages=messages,
-            betas=_CACHE_BETA,
         )
 
         messages.append({"role": "assistant", "content": response.content})
