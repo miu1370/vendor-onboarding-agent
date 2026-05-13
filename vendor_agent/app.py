@@ -200,7 +200,11 @@ with st.sidebar:
     mock_mode = st.toggle("🧪 Mock Mode (no API key needed)", value=not bool(_API_KEY))
 
     if mock_mode:
-        st.caption("Mock mode: uses pre-built results, no API call.")
+        # Auto-load all 3 cases the moment mock mode is on
+        for _cid in CASE_ORDER:
+            if _cid not in st.session_state.analyses:
+                st.session_state.analyses[_cid] = get_mock_result(_cid)
+        st.caption("Mock mode: all 3 cases pre-loaded.")
         can_run = True
     elif not _API_KEY:
         st.error("No API key. Enable Mock Mode above, or add key to .env / Streamlit Secrets.")
