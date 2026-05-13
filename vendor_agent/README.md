@@ -15,9 +15,9 @@ export ANTHROPIC_API_KEY=sk-ant-...
 streamlit run app.py
 ```
 
-The app opens at `http://localhost:8501`. Three pre-analyzed cases are loaded. To add a new vendor, click **➕ New Vendor** on the pipeline page and upload documents.
+The app opens at `http://localhost:8501`. Click **▶ Analyze** on any case to run the agent. Results are saved automatically to `analysis_results.json` — subsequent visits load from this file so the agent does not re-run unless you request a new version.
 
-> **Offline mode** — if no API key is set, the app loads from `analysis_results.json` (precomputed). All review and export features still work.
+To add a new vendor, click **➕ New Vendor** on the pipeline page and upload documents.
 
 ---
 
@@ -45,14 +45,25 @@ Candidate_package/
     ├── agent.py                # Claude tool-calling loop + Generator-Critic
     ├── parsers.py              # Document parsers (xlsx, csv, pdf, md, txt)
     ├── tools.py                # 9 tool functions + dispatcher
-    ├── mock_data.py            # Seed data for budget/vendor register
-    ├── precompute_results.py   # CLI to pre-run agent without API key
     ├── analysis_results.json   # Persisted analysis versions + reviewer decisions
     ├── audit_log.json          # Immutable record of all submitted decisions
     ├── new_vendors.json        # Newly uploaded vendors pending analysis
     ├── uploads/                # Uploaded vendor documents
     └── requirements.txt
 ```
+
+---
+
+## Deploying to Streamlit Cloud
+
+1. Push the repo to GitHub
+2. Go to [share.streamlit.io](https://share.streamlit.io) and connect the repo
+3. Set **Main file path** to `vendor_agent/app.py`
+4. Add the API key under **Advanced settings → Secrets**:
+   ```toml
+   ANTHROPIC_API_KEY = "sk-ant-..."
+   ```
+5. Deploy — Streamlit Cloud redeploys automatically on every push to `main`
 
 ---
 
@@ -67,14 +78,3 @@ Candidate_package/
 | **Procurement** | PRO-001 → PRO-009 | Vendor register, duplicate check, required docs, approval routing |
 
 Each rule produces: `result` (triggered / pass), `flag_severity` (blocking / warning / info), `flag_reason`, and `action_required`.
-
----
-
-## Precomputing Results (no API key required)
-
-```bash
-cd vendor_agent
-python precompute_results.py
-```
-
-Runs the agent on all three cases and writes results to `analysis_results.json`. The Streamlit app will load from this file automatically when no API key is present.
