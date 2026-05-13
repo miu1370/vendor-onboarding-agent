@@ -412,6 +412,109 @@ Return ONLY a valid JSON object — no markdown, no code blocks:
 
 
 # ---------------------------------------------------------------------------
+# Build case_facts from tool calls (deterministic fallback)
+# ---------------------------------------------------------------------------
+
+def _build_case_facts(tool_calls_log: list, case_data: dict, triage_output: dict) -> dict:
+    """
+    Assemble case_facts from tool call inputs/outputs so the UI is never empty
+    even if the LLM forgot to fill in case_facts in submit_triage_output.
+    """
+    by_tool: dict = {}
+    for tc in tool_calls_log:
+        by_tool.setdefault(tc["tool"], []).append(tc)
+
+    def _inp(tool): return (by_tool.get(tool) or [{}])[0].get("input", {})
+    def _out(tool): return (by_tool.get(tool) or [{}])[0].get("output", {})
+
+    intake    = case_data.get("intake", {})
+    budget    = _out("lookup_budget")
+    vendor_r  = _out("check_existing_vendor")
+    tcv_out   = _out("calculate_total_contract_value")
+    sens_out  = _out("classify_data_sensitivity")
+    clauses   = _out("extract_contract_clauses")
+    consis_i  = _inp("validate_cross_document_consistency")
+    consis_o  = _out("validate_cross_document_consistency")
+    chk_i     = _inp("run_policy_checklist")
+    submit_i  = _inp("submit_triage_output")
+
+    issue_types = [iss.get("type", "") for iss in (consis_o.get("issues") or [])]
+
+    governing_law_text = (clauses.get("governing_law") or {}).get("excerpt") or ""
+    us_states = ["delaware", "california", "new york", "texas", "washington", "nevada", "florida"]
+    gov_outside_us = chk_i.get("governing_law_outside_us",
+                        not any(s in governing_law_text.lower() for s in us_states)
+                        if governing_law_text else False)
+
+    liability_text = (clauses.get("limitation_of_liability") or {}).get("excerpt") or ""
+    liability_months = chk_i.get("liability_cap_months") or _parse_liability_months(liability_text)
+
+    payment = intake.get("payment_terms") or chk_i.get("payment_terms") or ""
+    net_days = None
+    m = re.search(r'Net\s*(\d+)', payment, re.IGNORECASE)
+    if m:
+        net_days = int(m.group(1))
+
+    doc_check = {k: v for k, v in intake.get("document_checklist", {}).items()
+                 if not k.startswith("Document Checklist")}
+    missing_docs = submit_i.get("missing_documents") or triage_output.get("missing_documents") or []
+
+    facts = {
+        "vendor_name":                   intake.get("vendor_name") or vendor_r.get("vendor_id"),
+        "vendor_category":               intake.get("vendor_category") or chk_i.get("vendor_category"),
+        "renewal_status":                intake.get("renewal_or_new_vendor") or chk_i.get("renewal_status"),
+        "cost_center":                   intake.get("cost_center"),
+        "acv":                           intake.get("annual_contract_value") or chk_i.get("acv"),
+        "tcv":                           tcv_out.get("total_contract_value") or chk_i.get("tcv"),
+        "contract_term_months":          intake.get("contract_term_months") or chk_i.get("contract_term_months"),
+        "payment_terms":                 payment,
+        "net_payment_days":              net_days,
+        "budget_remaining":              budget.get("annual_budget_remaining") or chk_i.get("budget_remaining"),
+        "budget_sufficient":             chk_i.get("budget_sufficient",
+                                             (budget.get("annual_budget_remaining") or 0) >= (intake.get("annual_contract_value") or 0)
+                                             if budget.get("annual_budget_remaining") is not None else None),
+        "data_sensitivity":              sens_out.get("sensitivity_level") or chk_i.get("data_sensitivity"),
+        "data_types":                    _inp("classify_data_sensitivity").get("data_types") or intake.get("data_access"),
+        "system_integrations":           chk_i.get("system_integrations") or intake.get("system_integrations"),
+        "subprocessors":                 consis_i.get("intake_subprocessors") or intake.get("subprocessors_declared"),
+        "has_eu_subprocessors":          chk_i.get("has_eu_subprocessors",
+                                             "European Union" in (clauses.get("subprocessor_regions_detected") or [])),
+        "has_apac_subprocessors":        chk_i.get("has_apac_subprocessors",
+                                             "APAC" in (clauses.get("subprocessor_regions_detected") or [])),
+        "ai_functionality":              intake.get("ai_functionality"),
+        "has_ai_training_language":      chk_i.get("has_ai_training",
+                                             (clauses.get("ai_model_training") or {}).get("found", False)),
+        "ai_training_opt_out_confirmed": chk_i.get("ai_training_opt_out_confirmed", False),
+        "soc2_type2_provided":           chk_i.get("soc2_type2_provided",
+                                             doc_check.get("SOC 2 Type II Report", {}).get("provided", False)),
+        "dpa_provided":                  chk_i.get("dpa_provided",
+                                             doc_check.get("Data Processing Agreement", {}).get("provided", False)),
+        "security_questionnaire_provided": chk_i.get("security_questionnaire_provided",
+                                             doc_check.get("Security Questionnaire", {}).get("provided", False)),
+        "auto_renewal_clause":           chk_i.get("auto_renewal_found",
+                                             (clauses.get("auto_renewal") or {}).get("found", False)),
+        "governing_law":                 governing_law_text or None,
+        "governing_law_outside_us":      gov_outside_us,
+        "liability_cap_months":          liability_months,
+        "dpa_referenced_in_contract":    chk_i.get("dpa_ref_in_contract",
+                                             (clauses.get("data_processing_agreement_ref") or {}).get("found", False)),
+        "vendor_in_register":            vendor_r.get("found", False),
+        "acv_matches_quote":             chk_i.get("acv_matches_quote",
+                                             "acv_mismatch" not in issue_types),
+        "subprocessors_consistent":      chk_i.get("subprocessors_consistent",
+                                             "subprocessor_undeclared_in_intake" not in issue_types),
+        "all_docs_provided":             chk_i.get("all_required_docs_provided", len(missing_docs) == 0),
+        "missing_documents":             missing_docs,
+    }
+    return {k: v for k, v in facts.items() if v is not None}
+
+
+def _parse_liability_months(text: str):
+    m = re.search(r'(\d+)\s*month', text, re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+# ---------------------------------------------------------------------------
 # Main agent entry point
 # ---------------------------------------------------------------------------
 
@@ -468,6 +571,10 @@ def run_vendor_agent(case_data: dict, policies: dict, api_key: str) -> dict:
 
         if triage_output:
             break
+
+    # Backfill case_facts deterministically if LLM left it empty
+    if triage_output and not triage_output.get("case_facts"):
+        triage_output["case_facts"] = _build_case_facts(tool_calls_log, case_data, triage_output)
 
     # Step 3: Critic — reflection pass for medium/high risk (Generator-Critic pattern)
     reflection = None
