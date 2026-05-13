@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 from parsers import load_case, load_policies
 from agent import run_vendor_agent
+from mock_data import get_mock_result
 
 # ---------------------------------------------------------------------------
 # Config
@@ -196,18 +197,22 @@ with st.sidebar:
     selected_label = st.selectbox("Select case", labels, label_visibility="collapsed")
     run_case_id = CASE_ORDER[labels.index(selected_label)]
 
-    if not _API_KEY:
-        st.error("ANTHROPIC_API_KEY not set.\n\nStreamlit Cloud → Settings → Secrets → add:\n`ANTHROPIC_API_KEY = \"sk-ant-...\"`")
+    mock_mode = st.toggle("🧪 Mock Mode (no API key needed)", value=not bool(_API_KEY))
+
+    if mock_mode:
+        st.caption("Mock mode: uses pre-built results, no API call.")
+        can_run = True
+    elif not _API_KEY:
+        st.error("No API key. Enable Mock Mode above, or add key to .env / Streamlit Secrets.")
+        can_run = False
+    elif not _API_KEY.startswith("sk-ant-"):
+        masked = _API_KEY[:14] + "..." + _API_KEY[-4:]
+        st.error(f"⚠️ Key format invalid: `{masked}`")
         can_run = False
     else:
         masked = _API_KEY[:14] + "..." + _API_KEY[-4:]
         st.caption(f"🔑 `{masked}` (from {_KEY_SOURCE})")
-        # Quick key format sanity check
-        if not _API_KEY.startswith("sk-ant-"):
-            st.error("⚠️ Key doesn't look like an Anthropic key (should start with `sk-ant-`). Check Streamlit Cloud → Settings → Secrets.")
-            can_run = False
-        else:
-            can_run = True
+        can_run = True
 
     run_btn = st.button(
         "▶ Run Agent Analysis",
@@ -227,17 +232,23 @@ with st.sidebar:
 # Run agent
 # ---------------------------------------------------------------------------
 if run_btn and can_run:
-    with st.spinner(f"Analyzing {selected_label}…"):
-        try:
-            case_data = load_case(run_case_id, BASE_PATH)
-            policies = load_policies(BASE_PATH)
-            result = run_vendor_agent(case_data, policies, _API_KEY)
-            st.session_state.analyses[run_case_id] = result
-            go_detail(run_case_id)
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Error: {exc}")
-            st.exception(exc)
+    if mock_mode:
+        result = get_mock_result(run_case_id)
+        st.session_state.analyses[run_case_id] = result
+        go_detail(run_case_id)
+        st.rerun()
+    else:
+        with st.spinner(f"Analyzing {selected_label}…"):
+            try:
+                case_data = load_case(run_case_id, BASE_PATH)
+                policies = load_policies(BASE_PATH)
+                result = run_vendor_agent(case_data, policies, _API_KEY)
+                st.session_state.analyses[run_case_id] = result
+                go_detail(run_case_id)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Error: {exc}")
+                st.exception(exc)
 
 
 # ===========================================================================
