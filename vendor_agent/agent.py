@@ -537,7 +537,7 @@ def run_vendor_agent(case_data: dict, policies: dict, api_key: str) -> dict:
     for _ in range(25):
         response = client.messages.create(
             model=MODEL,
-            max_tokens=4096,
+            max_tokens=8096,
             system=system,
             tools=TOOLS,
             messages=messages,
