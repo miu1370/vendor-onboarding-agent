@@ -5,7 +5,6 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 import streamlit as st
-import pandas as pd
 from parsers import load_case, load_policies
 from agent import run_vendor_agent
 
@@ -101,9 +100,10 @@ CATEGORY_POLICY_MAP = {
 
 DOMAIN_CHECKLIST_IDS = {
     "Finance":      ["FIN-001", "FIN-002", "FIN-003", "FIN-004",
-                     "FIN-005", "FIN-006", "FIN-007", "FIN-008", "FIN-009"],
-    "Legal":        ["LEG-001", "LEG-002", "LEG-003", "LEG-004",
-                     "LEG-005", "LEG-006", "LEG-007", "LEG-008", "LEG-009", "LEG-010"],
+                     "FIN-006", "FIN-007", "FIN-008", "FIN-009"],
+    "Legal":        ["FIN-005", "LEG-001", "LEG-002", "LEG-003", "LEG-004",
+                     "LEG-005", "LEG-006", "LEG-007", "LEG-008", "LEG-009", "LEG-010",
+                     "LEG-011", "LEG-012"],
     "Security":     ["SEC-001", "SEC-002", "SEC-003", "SEC-004", "SEC-005", "SEC-006", "SEC-007"],
     "Procurement":  ["PRO-001", "PRO-002", "PRO-003", "PRO-004", "PRO-005"],
     "Data Handling": ["DAT-001", "DAT-002", "DAT-003"],
@@ -177,279 +177,450 @@ DOMAIN_FACTS_FIELDS = {
 # Policy rule definitions — used in detail page checklist and Policy & Rules module
 # ---------------------------------------------------------------------------
 POLICY_RULES = {
-    # Finance
+    # ── Finance ──────────────────────────────────────────────────────────────
     "FIN-001": {
         "rule": "ACV — Procurement Manager Threshold",
-        "detail": "Approval is tiered by ACV. Above $25K, Procurement Manager is required. Above $50K adds VP Finance. Above $100K adds CFO. Above $250K adds Executive Sponsor. This check triggers at the $25K tier.",
-        "trigger": "ACV > $25,000",
+        "detail": (
+            "- `acv ≤ $25K` → Business Owner only\n"
+            "- `acv > $25K` → + Procurement Manager  ← **this rule**\n"
+            "- `acv > $50K` → + VP Finance\n"
+            "- `acv > $100K` → + CFO\n"
+            "- `acv > $250K` → + Executive Sponsor"
+        ),
+        "trigger": "acv > $25,000",
         "action": "Add Procurement Manager to approval chain",
         "severity": "Warning",
         "policy_ref": "Finance Approval Matrix",
     },
     "FIN-002": {
         "rule": "ACV — VP Finance Threshold",
-        "detail": "Above $50K ACV, VP Finance is required in addition to Procurement Manager. Below $50K, VP Finance is not needed on the basis of ACV alone.",
-        "trigger": "ACV > $50,000",
+        "detail": (
+            "- `acv ≤ $50K` → VP Finance not required on ACV alone\n"
+            "- `acv > $50K` → + VP Finance  ← **this rule**"
+        ),
+        "trigger": "acv > $50,000",
         "action": "Add VP Finance to approval chain",
         "severity": "Warning",
         "policy_ref": "Finance Approval Matrix",
     },
     "FIN-003": {
         "rule": "ACV — CFO Threshold",
-        "detail": "Above $100K ACV, CFO approval is required alongside Procurement Manager and VP Finance.",
-        "trigger": "ACV > $100,000",
+        "detail": (
+            "- `acv ≤ $100K` → CFO not required on ACV alone\n"
+            "- `acv > $100K` → + CFO  ← **this rule**"
+        ),
+        "trigger": "acv > $100,000",
         "action": "Add CFO to approval chain",
         "severity": "Warning",
         "policy_ref": "Finance Approval Matrix",
     },
     "FIN-004": {
         "rule": "ACV — Executive Sponsor Threshold",
-        "detail": "Above $250K ACV, Executive Sponsor approval is required alongside Procurement Manager and CFO.",
-        "trigger": "ACV > $250,000",
+        "detail": (
+            "- `acv ≤ $250K` → Executive Sponsor not required on ACV alone\n"
+            "- `acv > $250K` → + Executive Sponsor  ← **this rule**"
+        ),
+        "trigger": "acv > $250,000",
         "action": "Add Executive Sponsor to approval chain",
-        "severity": "Warning",
-        "policy_ref": "Finance Approval Matrix",
-    },
-    "FIN-005": {
-        "rule": "TCV — Legal Review Threshold",
-        "detail": "Total Contract Value (ACV × term ÷ 12 + one-time fees) above $100K triggers mandatory Legal review, independent of ACV.",
-        "trigger": "TCV > $100,000",
-        "action": "Route to Legal for contract review",
         "severity": "Warning",
         "policy_ref": "Finance Approval Matrix",
     },
     "FIN-006": {
         "rule": "TCV — Executive Sponsor Threshold",
-        "detail": "TCV above $250K requires Executive Sponsor approval, independent of ACV tier.",
-        "trigger": "TCV > $250,000",
+        "detail": (
+            "- `tcv ≤ $250K` → Executive Sponsor not required on TCV alone\n"
+            "- `tcv > $250K` → + Executive Sponsor  ← **this rule**\n\n"
+            "tcv = acv × (term_months / 12) + one_time_fees"
+        ),
+        "trigger": "tcv > $250,000",
         "action": "Add Executive Sponsor to approval chain",
         "severity": "Warning",
         "policy_ref": "Finance Approval Matrix",
     },
     "FIN-007": {
-        "rule": "Payment Terms — Extended Terms Review",
-        "detail": "Net 30 is standard (no flag). Net 45 requires Procurement Manager. Net 60 triggers a warning requiring VP Finance. Beyond Net 60 is blocking and also requires Legal.",
-        "trigger": "Payment terms ≥ Net 60",
-        "action": "Add VP Finance (and Legal if > Net 60) to approval chain",
+        "rule": "Payment Terms — Finance Review Threshold",
+        "detail": (
+            "- `Net 30` → passes (standard)\n"
+            "- `Net 45` → Procurement Manager review\n"
+            "- `Net 60` → VP Finance review  ← **this rule triggers**\n"
+            "- `> Net 60` → VP Finance + Legal review (blocking) — see LEG-011"
+        ),
+        "trigger": "payment_terms ≥ Net 60",
+        "action": "Add VP Finance to approval chain",
         "severity": "Warning / Blocking",
         "policy_ref": "Finance Approval Matrix",
     },
     "FIN-008": {
         "rule": "Contract Term — Multi-Year Finance Review",
-        "detail": "Contracts of 24 months or less are standard. Contracts longer than 24 months create a multi-year spend commitment and require Finance review.",
-        "trigger": "Contract term > 24 months",
+        "detail": (
+            "- `term ≤ 24 months` → passes\n"
+            "- `term > 24 months` → Finance review required  ← **this rule**\n\n"
+            "Multi-year commitments require Finance sign-off on spend trajectory."
+        ),
+        "trigger": "contract_term_months > 24",
         "action": "Route to Finance for multi-year contract review",
         "severity": "Warning",
         "policy_ref": "Finance Approval Matrix",
     },
     "FIN-009": {
         "rule": "Budget — Remaining vs ACV",
-        "detail": "If the cost center's remaining budget is less than the ACV, Finance/FP&A must approve before routing regardless of ACV tier. Unknown or missing budget status also triggers escalation.",
-        "trigger": "Budget remaining < ACV, or budget status unknown",
+        "detail": (
+            "- `budget_remaining ≥ acv` → passes\n"
+            "- `budget_remaining < acv` → Finance/FP&A approval required  ← **this rule**\n"
+            "- `budget_remaining = unknown` → escalate to Finance  ← **this rule**\n\n"
+            "Applies regardless of ACV tier."
+        ),
+        "trigger": "budget_remaining < acv, or budget status unknown",
         "action": "Escalate to Finance/FP&A for budget reallocation before proceeding",
         "severity": "Blocking",
         "policy_ref": "Finance Approval Matrix",
     },
-    # Legal
+    # ── Legal ─────────────────────────────────────────────────────────────────
+    "FIN-005": {
+        "rule": "TCV — Legal Review Threshold",
+        "detail": (
+            "- `tcv ≤ $100K` → Legal review not required on TCV alone\n"
+            "- `tcv > $100K` → Legal review required  ← **this rule**\n\n"
+            "tcv = acv × (term_months / 12) + one_time_fees. Independent of ACV tier."
+        ),
+        "trigger": "tcv > $100,000",
+        "action": "Route to Legal for contract review",
+        "severity": "Warning",
+        "policy_ref": "Finance Approval Matrix",
+    },
     "LEG-001": {
-        "rule": "ACV > $50K — Legal Review Required",
-        "detail": "Any contract with ACV above $50K requires Legal review of the contract, in addition to finance approvals.",
-        "trigger": "ACV > $50,000",
+        "rule": "ACV — Legal Review Threshold",
+        "detail": (
+            "- `acv ≤ $50K` → Legal review not required on ACV alone\n"
+            "- `acv > $50K` → Legal review required  ← **this rule**"
+        ),
+        "trigger": "acv > $50,000",
         "action": "Route to Legal",
         "severity": "Warning",
         "policy_ref": "Legal Review Policy",
     },
     "LEG-002": {
-        "rule": "Contract Term > 12 Months — Legal Review",
-        "detail": "Contracts of 12 months or less do not require Legal review on term alone. Contracts longer than 12 months require Legal review.",
-        "trigger": "Contract term > 12 months",
+        "rule": "Contract Term — Legal Review Threshold",
+        "detail": (
+            "- `term ≤ 12 months` → Legal review not required on term alone\n"
+            "- `term > 12 months` → Legal review required  ← **this rule**"
+        ),
+        "trigger": "contract_term_months > 12",
         "action": "Route to Legal for review",
         "severity": "Warning",
         "policy_ref": "Legal Review Policy",
     },
     "LEG-003": {
         "rule": "Personal / Confidential Data — DPA Required",
-        "detail": "If the vendor processes confidential or restricted data (PII, employee data, customer data), a Data Processing Agreement must be provided. Missing DPA with personal data is a blocking issue.",
-        "trigger": "Data sensitivity = confidential or restricted, AND DPA document not provided",
+        "detail": (
+            "- `sensitivity ∈ {confidential, restricted}` AND `dpa_provided = true` → passes\n"
+            "- `sensitivity ∈ {confidential, restricted}` AND `dpa_provided = false` → **BLOCK**  ← **this rule**\n"
+            "- `sensitivity ∈ {public, internal}` → not evaluated"
+        ),
+        "trigger": "sensitivity ∈ {confidential, restricted} AND dpa_provided = false",
         "action": "Request DPA from vendor before proceeding",
         "severity": "Blocking",
         "policy_ref": "Data Handling Policy",
     },
     "LEG-004": {
-        "rule": "AI / ML on Company Data — Executive Approval Required",
-        "detail": "If the contract or questionnaire indicates the vendor may use company, customer, or employee data for model training, benchmarking, or product improvement, Legal and Executive Sponsor approval is required. This is blocking until contractually prohibited or explicitly approved.",
-        "trigger": "AI/model-training language detected in contract or security questionnaire",
+        "rule": "AI / ML on Company Data — Legal + Executive Approval",
+        "detail": (
+            "- `has_ai_training = false` → passes\n"
+            "- `has_ai_training = true` AND `opt_out_confirmed = true` → passes\n"
+            "- `has_ai_training = true` AND `opt_out_confirmed = false` → **BLOCK**  ← **this rule**\n\n"
+            "Ambiguous language ('service improvement', 'model enhancement', 'benchmarking') counts as detected."
+        ),
+        "trigger": "has_ai_training = true AND opt_out_confirmed = false",
         "action": "Escalate to Legal and Executive Sponsor; confirm opt-out or prohibit training use",
         "severity": "Blocking",
         "policy_ref": "Legal Review Policy",
     },
     "LEG-005": {
         "rule": "EU Subprocessors — GDPR Review",
-        "detail": "Vendors with EU-based subprocessors require Legal review for GDPR compliance, including Standard Contractual Clauses or other valid transfer mechanisms.",
-        "trigger": "EU-based subprocessors detected",
+        "detail": (
+            "- `has_eu_subprocessors = false` → passes\n"
+            "- `has_eu_subprocessors = true` → Legal GDPR/SCC review required  ← **this rule**\n\n"
+            "Legal must verify Standard Contractual Clauses or equivalent transfer mechanism."
+        ),
+        "trigger": "has_eu_subprocessors = true",
         "action": "Route to Legal for EU data transfer review",
         "severity": "Warning",
         "policy_ref": "Legal Review Policy",
     },
     "LEG-006": {
         "rule": "APAC Subprocessors — Cross-Border Transfer Review",
-        "detail": "Vendors with APAC subprocessors require Legal review for applicable cross-border data transfer compliance.",
-        "trigger": "APAC-based subprocessors detected",
+        "detail": (
+            "- `has_apac_subprocessors = false` → passes\n"
+            "- `has_apac_subprocessors = true` → Legal cross-border review required  ← **this rule**"
+        ),
+        "trigger": "has_apac_subprocessors = true",
         "action": "Route to Legal for APAC data transfer review",
         "severity": "Warning",
         "policy_ref": "Legal Review Policy",
     },
     "LEG-007": {
-        "rule": "Liability Cap Below 12-Month Standard",
-        "detail": "The standard minimum liability cap is 12 months of fees. A cap below 12 months is non-standard and requires Legal negotiation. Cap ≥ 12 months passes. If no cap clause is found, this check is not evaluated.",
-        "trigger": "Liability cap detected AND cap < 12 months of fees",
-        "action": "Request Legal review and negotiate a higher liability cap",
+        "rule": "Liability Cap — Below 12-Month Standard",
+        "detail": (
+            "- Liability cap clause not found → not evaluated\n"
+            "- `liability_cap_months ≥ 12` → passes\n"
+            "- `liability_cap_months < 12` → Legal negotiation required  ← **this rule**\n\n"
+            "Standard minimum is 12 months of fees paid."
+        ),
+        "trigger": "liability_cap_months detected AND liability_cap_months < 12",
+        "action": "Request Legal review and negotiate higher liability cap",
         "severity": "Warning",
         "policy_ref": "Legal Review Policy",
     },
     "LEG-008": {
-        "rule": "Auto-Renewal Clause — Renewal Tracking Required",
-        "detail": "Auto-renewal does not block approval, but requires calendar tracking to avoid unintended renewals. No auto-renewal clause means no action needed on this check.",
-        "trigger": "Auto-renewal language found in contract",
-        "action": "Log renewal date; set a reminder 60 days before the renewal window",
+        "rule": "Auto-Renewal Clause — Tracking Required",
+        "detail": (
+            "- `auto_renewal_found = false` → passes\n"
+            "- `auto_renewal_found = true` → log renewal date  ← **this rule** (info only, does not block)\n\n"
+            "Set calendar reminder ≥ 60 days before renewal window to avoid unintended lock-in."
+        ),
+        "trigger": "auto_renewal_found = true",
+        "action": "Log renewal date; set calendar reminder 60 days before renewal window",
         "severity": "Info",
         "policy_ref": "Legal Review Policy",
     },
     "LEG-009": {
-        "rule": "Governing Law Outside the US",
-        "detail": "US-governed contracts pass this check. Contracts governed by non-US law introduce jurisdiction risk and require Legal to assess enforceability and compliance implications.",
-        "trigger": "Governing law clause references a jurisdiction outside the United States",
+        "rule": "Governing Law — Outside the US",
+        "detail": (
+            "- `governing_law ∈ US jurisdictions` → passes\n"
+            "- `governing_law ∉ US jurisdictions` → Legal review required  ← **this rule**\n\n"
+            "Non-US governing law introduces enforceability and compliance jurisdiction risk."
+        ),
+        "trigger": "governing_law references jurisdiction outside the United States",
         "action": "Route to Legal to assess jurisdiction risk",
         "severity": "Warning",
         "policy_ref": "Legal Review Policy",
     },
     "LEG-010": {
-        "rule": "DPA Not Referenced in Main Contract",
-        "detail": "When personal or confidential data is processed, the DPA should be incorporated by reference in the contract body or attached as an exhibit. This is separate from whether the DPA document itself was provided.",
-        "trigger": "Data sensitivity = confidential/restricted, AND DPA not referenced in contract text",
+        "rule": "DPA — Not Referenced in Contract Body",
+        "detail": (
+            "- `sensitivity ∈ {public, internal}` → not evaluated\n"
+            "- `sensitivity ∈ {confidential, restricted}` AND `dpa_ref_in_contract = true` → passes\n"
+            "- `sensitivity ∈ {confidential, restricted}` AND `dpa_ref_in_contract = false` → Warning  ← **this rule**\n\n"
+            "Separate from LEG-003 (document provided). The DPA must also be incorporated by reference or attached as an exhibit in the contract body."
+        ),
+        "trigger": "sensitivity ∈ {confidential, restricted} AND dpa_ref_in_contract = false",
         "action": "Ensure DPA is incorporated by reference or attached as an exhibit",
         "severity": "Warning",
         "policy_ref": "Data Handling Policy",
     },
-    # Security
+    "LEG-011": {
+        "rule": "Payment Terms — Legal Review Threshold",
+        "detail": (
+            "- `payment_terms ≤ Net 60` → Legal not required on payment terms alone\n"
+            "- `payment_terms > Net 60` → VP Finance + Legal review required  ← **this rule**\n\n"
+            "Applies in addition to FIN-007 (Finance flag). Legal reviews extended payment risk and enforceability."
+        ),
+        "trigger": "payment_terms > Net 60",
+        "action": "Route to Legal alongside VP Finance for extended payment terms review",
+        "severity": "Warning",
+        "policy_ref": "Finance Approval Matrix",
+    },
+    "LEG-012": {
+        "rule": "Personal / Confidential Data — Legal Data Protection Review",
+        "detail": (
+            "- `sensitivity ∈ {public, internal}` → not evaluated\n"
+            "- `sensitivity ∈ {confidential, restricted}` → Legal must confirm all of:  ← **this rule**\n"
+            "  1. DPA in place and signed\n"
+            "  2. Subprocessor list disclosed\n"
+            "  3. Breach notification language acceptable\n"
+            "  4. Data retention and deletion obligations documented\n\n"
+            "Complements LEG-003 (DPA document check) and LEG-010 (DPA contract reference)."
+        ),
+        "trigger": "sensitivity ∈ {confidential, restricted}",
+        "action": "Legal to verify breach notification, data retention/deletion, and subprocessor disclosure",
+        "severity": "Warning",
+        "policy_ref": "Legal Review Policy",
+    },
+    # ── Security ──────────────────────────────────────────────────────────────
     "SEC-001": {
         "rule": "SOC 2 Type II — Required for SaaS Vendors",
-        "detail": "SaaS and software vendors must provide a current SOC 2 Type II report or equivalent. Missing report blocks SaaS approval. Non-SaaS vendors (e.g., office supplies) are exempt from this check.",
-        "trigger": "Vendor is SaaS/software, AND SOC 2 Type II report not provided",
+        "detail": (
+            "- `vendor_category ∉ SaaS/software` → not evaluated\n"
+            "- `vendor_category ∈ SaaS/software` AND `soc2_provided = true` → passes\n"
+            "- `vendor_category ∈ SaaS/software` AND `soc2_provided = false` → **BLOCK**  ← **this rule**"
+        ),
+        "trigger": "vendor_category = SaaS/software AND soc2_type2_provided = false",
         "action": "Request SOC 2 Type II report from vendor before proceeding",
         "severity": "Blocking",
         "policy_ref": "Security Review Policy",
     },
     "SEC-002": {
         "rule": "Data Sensitivity — Security Review Required",
-        "detail": "Internal data: no Security review needed. Confidential data: Security review (warning). Restricted data (PII, employee sensitive data): Security review at higher severity (blocking for some sub-checks).",
-        "trigger": "Data sensitivity = confidential or restricted",
+        "detail": (
+            "- `sensitivity = public` → not evaluated\n"
+            "- `sensitivity = internal` → not evaluated\n"
+            "- `sensitivity = confidential` → Security review (warning)  ← **this rule**\n"
+            "- `sensitivity = restricted` → Security review (blocking)  ← **this rule**"
+        ),
+        "trigger": "sensitivity ∈ {confidential, restricted}",
         "action": "Route to Security for data access review",
         "severity": "Warning / Blocking",
         "policy_ref": "Security Review Policy",
     },
     "SEC-003": {
         "rule": "High-Risk System Integrations",
-        "detail": "Integrations with CRM, HRIS, finance, production, ERP, or payroll systems are high-risk. Security must review the integration scope and data flows for any such connection.",
-        "trigger": "Vendor integrates with CRM, HRIS, finance, production, ERP, or payroll systems",
+        "detail": (
+            "- No high-risk integrations → passes\n"
+            "- Integration with `CRM | HRIS | Finance | Production | ERP | Payroll` detected → Security review  ← **this rule**"
+        ),
+        "trigger": "integrations ∩ {CRM, HRIS, Finance, Production, ERP, Payroll} ≠ ∅",
         "action": "Security must review integration scope and data flows",
         "severity": "Warning",
         "policy_ref": "Security Review Policy",
     },
     "SEC-004": {
         "rule": "AI Training Opt-Out — Explicit Confirmation Required",
-        "detail": "If AI training language is found: confirmed opt-out → passes. No opt-out confirmed + restricted data → blocking. No opt-out confirmed + confidential/internal data → warning.",
-        "trigger": "AI training language present, AND opt-out not confirmed",
-        "action": "Confirm opt-out clause with vendor, or require contract amendment prohibiting training use",
+        "detail": (
+            "- `has_ai_training = false` → passes\n"
+            "- `has_ai_training = true` AND `opt_out_confirmed = true` → passes\n"
+            "- `has_ai_training = true` AND `opt_out_confirmed = false` AND `sensitivity = restricted` → **BLOCK**  ← **this rule**\n"
+            "- `has_ai_training = true` AND `opt_out_confirmed = false` AND `sensitivity ≠ restricted` → Warning  ← **this rule**"
+        ),
+        "trigger": "has_ai_training = true AND opt_out_confirmed = false",
+        "action": "Confirm opt-out clause with vendor or prohibit training use via contract amendment",
         "severity": "Warning / Blocking",
         "policy_ref": "Data Handling Policy",
     },
     "SEC-005": {
         "rule": "Security Questionnaire — Required Document",
-        "detail": "All SaaS and software vendors must submit a completed security questionnaire. A missing questionnaire blocks approval regardless of other conditions.",
-        "trigger": "Security questionnaire not provided",
+        "detail": (
+            "- `security_questionnaire_provided = true` → passes\n"
+            "- `security_questionnaire_provided = false` → **BLOCK**  ← **this rule**\n\n"
+            "Required for all vendors regardless of risk tier."
+        ),
+        "trigger": "security_questionnaire_provided = false",
         "action": "Request completed security questionnaire from vendor",
         "severity": "Blocking",
         "policy_ref": "Security Review Policy",
     },
     "SEC-006": {
         "rule": "EU Subprocessors — Security Transfer Controls",
-        "detail": "EU-based subprocessors require Security to verify appropriate data transfer controls, such as encryption standards and DPA coverage.",
-        "trigger": "EU subprocessors present",
+        "detail": (
+            "- `has_eu_subprocessors = false` → passes\n"
+            "- `has_eu_subprocessors = true` → Security reviews transfer controls  ← **this rule**\n\n"
+            "Complements LEG-005 (Legal GDPR review). Security verifies encryption and DPA coverage."
+        ),
+        "trigger": "has_eu_subprocessors = true",
         "action": "Security team to review EU subprocessor list and transfer mechanisms",
         "severity": "Warning",
         "policy_ref": "Security Review Policy",
     },
     "SEC-007": {
         "rule": "APAC Subprocessors — Security Transfer Controls",
-        "detail": "APAC-based subprocessors require Security to verify regional compliance requirements and applicable data transfer controls.",
-        "trigger": "APAC subprocessors present",
+        "detail": (
+            "- `has_apac_subprocessors = false` → passes\n"
+            "- `has_apac_subprocessors = true` → Security reviews transfer controls  ← **this rule**\n\n"
+            "Complements LEG-006 (Legal cross-border review)."
+        ),
+        "trigger": "has_apac_subprocessors = true",
         "action": "Security team to review APAC subprocessor list and transfer mechanisms",
         "severity": "Warning",
         "policy_ref": "Security Review Policy",
     },
-    # Procurement
+    # ── Procurement ───────────────────────────────────────────────────────────
     "PRO-001": {
-        "rule": "Intake Form Completeness",
-        "detail": "Every request must include: vendor name, requesting team, business owner, cost center, business justification, vendor category, ACV, contract term, start date, and new/renewal status. Missing any required field prevents triage from proceeding.",
-        "trigger": "One or more required intake fields are missing",
-        "action": "Request business owner to complete all required intake fields",
+        "rule": "Intake Form — Required Fields Complete",
+        "detail": (
+            "- All fields present → passes\n"
+            "- Any required field missing → Warning  ← **this rule**\n\n"
+            "Required: vendor name, requesting team, business owner, cost center, business justification, "
+            "vendor category, ACV, contract term, start date, new/renewal status."
+        ),
+        "trigger": "required_intake_fields_complete = false",
+        "action": "Request business owner to complete all intake form fields",
         "severity": "Warning",
         "policy_ref": "Procurement Policy",
     },
     "PRO-002": {
-        "rule": "Duplicate Vendor / Register Consistency",
-        "detail": "New vendor already in register → likely duplicate, blocking. Renewal not found in register → vendor ID must be confirmed, warning. Consistent status → passes.",
-        "trigger": "New vendor found in register (blocking), OR renewal vendor not found in register (warning)",
+        "rule": "Vendor Register — Duplicate / Consistency Check",
+        "detail": (
+            "- `renewal_status = new_vendor` AND `vendor_in_register = false` → passes\n"
+            "- `renewal_status = renewal` AND `vendor_in_register = true` → passes\n"
+            "- `renewal_status = new_vendor` AND `vendor_in_register = true` → **BLOCK** (likely duplicate)  ← **this rule**\n"
+            "- `renewal_status = renewal` AND `vendor_in_register = false` → Warning (ID unconfirmed)  ← **this rule**"
+        ),
+        "trigger": "renewal_status conflicts with vendor_in_register",
         "action": "Confirm vendor status with business owner before proceeding",
         "severity": "Blocking / Warning",
         "policy_ref": "Vendor Risk Policy",
     },
     "PRO-003": {
         "rule": "ACV Consistency — Intake vs Quote",
-        "detail": "The ACV in the intake form must match the annual total on the vendor quote. Any discrepancy greater than $1 is flagged and must be reconciled before routing.",
-        "trigger": "ACV from intake ≠ ACV from vendor quote",
+        "detail": (
+            "- `intake_acv = quote_annual_total` → passes\n"
+            "- `intake_acv ≠ quote_annual_total` → Warning, reconcile before routing  ← **this rule**\n\n"
+            "Tolerance: exact match required (discrepancy > $1 triggers)."
+        ),
+        "trigger": "intake_acv ≠ quote_annual_total",
         "action": "Reconcile ACV discrepancy with business owner before routing",
         "severity": "Warning",
         "policy_ref": "Procurement Policy",
     },
     "PRO-004": {
         "rule": "Subprocessor Consistency — Intake vs Questionnaire",
-        "detail": "The subprocessor lists in the intake form and the security questionnaire must be consistent. Discrepancies indicate one document may be incomplete or outdated.",
-        "trigger": "Subprocessor lists differ between intake form and security questionnaire",
-        "action": "Business owner to confirm the complete and accurate subprocessor list",
+        "detail": (
+            "- `intake_subprocessors = questionnaire_subprocessors` → passes\n"
+            "- Lists differ → Warning  ← **this rule**\n\n"
+            "Indicates one document may be outdated or incomplete."
+        ),
+        "trigger": "intake_subprocessors ≠ questionnaire_subprocessors",
+        "action": "Business owner to confirm complete and accurate subprocessor list",
         "severity": "Warning",
         "policy_ref": "Procurement Policy",
     },
     "PRO-005": {
-        "rule": "Document Checklist Completeness",
-        "detail": "SaaS vendors must provide: quote, contract, security questionnaire, DPA (if personal data), and SOC 2 Type II. Low-risk vendors need fewer documents. Incomplete sets block approval routing.",
-        "trigger": "One or more required documents are missing",
+        "rule": "Document Checklist — Completeness",
+        "detail": (
+            "- All required documents provided → passes\n"
+            "- Any required document missing → Warning  ← **this rule**\n\n"
+            "SaaS required: quote, contract, security questionnaire, SOC 2 Type II, DPA (if personal data).\n"
+            "Low-risk required: quote, business owner approval, tax form."
+        ),
+        "trigger": "all_required_docs_provided = false",
         "action": "Request missing documents from vendor or business owner",
         "severity": "Warning",
         "policy_ref": "Procurement Policy",
     },
-    # Data Handling
+    # ── Data Handling ─────────────────────────────────────────────────────────
     "DAT-001": {
         "rule": "AI / Model Training Language — Detected",
-        "detail": "Any language in the contract or questionnaire referencing AI model training, benchmarking, 'service improvement,' or 'model enhancement' using company data is flagged. Legal and Security must review the data-use scope.",
-        "trigger": "AI/model-training language found in contract or security questionnaire",
-        "action": "Legal and Security to review data-use scope and confirm opt-out",
+        "detail": (
+            "- No AI/training language found → passes\n"
+            "- AI/training language detected → Warning, Legal + Security review  ← **this rule**\n\n"
+            "Flagged terms: 'model training', 'benchmarking', 'service improvement', 'model enhancement', 'product analytics' when personal or confidential data is in scope."
+        ),
+        "trigger": "has_ai_training = true",
+        "action": "Legal and Security to review data-use scope; confirm opt-out",
         "severity": "Warning",
         "policy_ref": "Data Handling Policy",
     },
     "DAT-002": {
-        "rule": "Model Training Without Confirmed Opt-Out",
-        "detail": "AI training found + opt-out confirmed → passes. AI training found + opt-out NOT confirmed + restricted data → blocking. AI training found + opt-out NOT confirmed + other data → warning.",
-        "trigger": "AI training language present, AND opt-out not confirmed",
+        "rule": "Model Training — Without Confirmed Opt-Out",
+        "detail": (
+            "- `has_ai_training = false` → passes\n"
+            "- `has_ai_training = true` AND `opt_out_confirmed = true` → passes\n"
+            "- `has_ai_training = true` AND `opt_out_confirmed = false` AND `sensitivity = restricted` → **BLOCK**  ← **this rule**\n"
+            "- `has_ai_training = true` AND `opt_out_confirmed = false` AND `sensitivity ≠ restricted` → Warning  ← **this rule**"
+        ),
+        "trigger": "has_ai_training = true AND opt_out_confirmed = false",
         "action": "Block until vendor confirms opt-out or amends contract to exclude training use",
         "severity": "Warning / Blocking",
         "policy_ref": "Data Handling Policy",
     },
     "DAT-003": {
-        "rule": "Cross-Border Transfer of Restricted Data",
-        "detail": "Non-US subprocessors + non-restricted data → warning-level review only. Non-US subprocessors + restricted data (PII, employee sensitive data) → blocking. Both Legal and Security must approve before proceeding.",
-        "trigger": "EU or APAC subprocessors present, AND data sensitivity = restricted",
+        "rule": "Cross-Border Transfer — Restricted Data",
+        "detail": (
+            "- No non-US subprocessors → passes\n"
+            "- Non-US subprocessors AND `sensitivity ∉ restricted` → Warning (review only)\n"
+            "- Non-US subprocessors AND `sensitivity = restricted` → **BLOCK**  ← **this rule**\n\n"
+            "non-US subprocessors = `has_eu_subprocessors = true` OR `has_apac_subprocessors = true`"
+        ),
+        "trigger": "(has_eu_subprocessors OR has_apac_subprocessors) AND sensitivity = restricted",
         "action": "Legal and Security must review cross-border data transfer controls before proceeding",
         "severity": "Blocking",
         "policy_ref": "Data Handling Policy",
@@ -476,6 +647,8 @@ _RULE_OWNERS = {
     "LEG-008": "Procurement",
     "LEG-009": "Legal",
     "LEG-010": "Legal",
+    "LEG-011": "Legal",
+    "LEG-012": "Legal",
     "SEC-001": "Vendor",
     "SEC-002": "Security",
     "SEC-003": "Security",
@@ -593,12 +766,6 @@ def add_version(case_id: str, result: dict):
     st.session_state.selected_version[case_id] = len(st.session_state.analyses[case_id]) - 1
     _save_results()
 
-
-def _record_category_decision(case_id: str, v_num: int, cat: str, decision: dict):
-    st.session_state.category_decisions \
-        .setdefault(case_id, {}) \
-        .setdefault(v_num, {})[cat] = decision
-    _save_results()
 
 
 def _record_final_decision(case_id: str, v_num: int, decision: dict):
