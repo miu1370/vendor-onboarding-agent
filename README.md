@@ -2,7 +2,7 @@
 
 A human-in-the-loop AI platform that automates vendor procurement review. The agent parses intake documents, runs 34 policy checks across 5 compliance domains, scores risk, and surfaces structured findings for human reviewers — who accept, modify, or override each check before submitting a final onboarding decision.
 
-See [ARCHITECTURE.md](../ARCHITECTURE.md) for the design rationale and productionization path.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the design rationale and productionization path.
 
 ---
 
@@ -72,9 +72,9 @@ Candidate_package/
 | Domain | IDs | Key checks |
 |--------|-----|------------|
 | **Finance** | FIN-001 → FIN-009 | ACV/TCV approval thresholds, payment terms, budget sufficiency, contract duration |
-| **Legal** | LEG-001 → LEG-007 | Governing law, liability cap, auto-renewal, DPA, AI training opt-out |
-| **Security** | SEC-001 → SEC-006 | SOC 2 Type II, security questionnaire, data residency, EU subprocessors |
-| **Data Handling** | DAT-001 → DAT-003 | Restricted data, PII handling, cross-border transfer |
-| **Procurement** | PRO-001 → PRO-009 | Vendor register, duplicate check, required docs, approval routing |
+| **Legal** | FIN-005, LEG-001 → LEG-012 | TCV/ACV triggers, governing law, liability cap, auto-renewal, DPA, AI training opt-out, data protection review |
+| **Security** | SEC-001 → SEC-007 | SOC 2 Type II, security questionnaire, data sensitivity, system integrations, subprocessor transfer controls |
+| **Data Handling** | DAT-001 → DAT-003 | AI training language, opt-out confirmation, cross-border restricted data |
+| **Procurement** | PRO-001 → PRO-005 | Intake completeness, vendor register, ACV/subprocessor consistency, document checklist |
 
 Each rule produces: `result` (triggered / pass), `flag_severity` (blocking / warning / info), `flag_reason`, and `action_required`.
